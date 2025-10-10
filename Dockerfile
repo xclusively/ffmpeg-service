@@ -10,6 +10,6 @@ RUN npm install --production
 # Copy source code
 COPY src/ ./src/
 
-EXPOSE 3005
+EXPOSE 8080
 
 CMD ["node", "src/app.js"]

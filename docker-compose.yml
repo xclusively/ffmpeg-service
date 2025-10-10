@@ -3,7 +3,7 @@ services:
     build: .
     image: ffmpeg-service:latest
     ports:
-      - "3005:3005"
+      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - video-temp:/tmp/videos
