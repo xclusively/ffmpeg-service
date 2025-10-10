@@ -22,7 +22,8 @@ services:
     networks:
       - cent-stage-network
     restart: unless-stopped
-    command: ["cat"]
+    entrypoint: ["sh"] # ✅ Override ffmpeg entrypoint
+    command: ["-c", "while true; do sleep 30; done"] # ✅ Shell command
 
 volumes:
   video-temp:
