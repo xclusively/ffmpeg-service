@@ -4,7 +4,7 @@ const transcodeRouter = require("./src/routes/transcode");
 const logger = require("./src/config/logger");
 
 const app = express();
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8567;
 
 // Middleware
 app.use(corsMiddleware);
