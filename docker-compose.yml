@@ -23,11 +23,6 @@ services:
       - cent-stage-network
     restart: unless-stopped
     command: ["sh", "-c", "sleep infinity"]
-    healthcheck:
-      test: ["CMD", "sh", "-c", "ps aux | grep -v grep | grep sleep"] # ✅ Fixed
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
 volumes:
   video-temp:
