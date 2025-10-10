@@ -1,0 +1,32 @@
+services:
+  ffmpeg-service:
+    build: .
+    image: ffmpeg-service:latest
+    ports:
+      - "3005:3005"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - video-temp:/tmp/videos
+    networks:
+      - cent-stage-network
+    restart: unless-stopped
+    depends_on:
+      - ffmpeg-worker
+    environment:
+      - NODE_ENV=production
+
+  ffmpeg-worker:
+    image: jrottenberg/ffmpeg:latest
+    volumes:
+      - video-temp:/tmp/videos
+    networks:
+      - cent-stage-network
+    restart: unless-stopped
+    command: ["sleep", "infinity"]
+
+volumes:
+  video-temp:
+
+networks:
+  cent-stage-network:
+    external: true
