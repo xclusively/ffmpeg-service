@@ -120,18 +120,32 @@ class FFmpegService {
   getOptimalTargets(width, height, paths) {
     const targets = [];
 
-    if (height >= 1150 || width >= 2000) {
+    // Create ALL variants that are smaller than the original
+    // 1080p: Create if original is larger than 1080p
+    if (height > 1080 || width > 1920) {
       targets.push({ h: 1080, key: "p1080", path: paths.p1080 });
     }
-    if (height >= 800 || width >= 1400) {
+
+    // 720p: Create if original is larger than 720p
+    if (height > 720 || width > 1280) {
       targets.push({ h: 720, key: "p720", path: paths.p720 });
     }
-    if (height >= 550 || width >= 900) {
+
+    // 480p: Create if original is larger than 480p
+    if (height > 480 || width > 854) {
       targets.push({ h: 480, key: "p480", path: paths.p480 });
     }
-    if (height >= 400 || width >= 600) {
+
+    // 360p: Create if original is larger than 360p
+    if (height > 360 || width > 640) {
       targets.push({ h: 360, key: "p360", path: paths.p360 });
     }
+
+    logger.info(
+      `Original: ${width}x${height} -> Creating variants: ${targets
+        .map((t) => t.h + "p")
+        .join(", ")}`
+    );
 
     return targets;
   }
