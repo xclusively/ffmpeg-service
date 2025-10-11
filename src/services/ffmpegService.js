@@ -10,11 +10,17 @@ const logger = require("../config/logger");
 const execAsync = util.promisify(exec);
 const SHARED_VIDEO_PATH = "/tmp/videos";
 
-// Create Redis queue
+// Create Redis queue with better connection handling
 const transcodeQueue = new Queue("video transcoding", {
   redis: {
-    host: process.env.REDIS_HOST || "redis",
+    host: process.env.REDIS_HOST || "host.docker.internal",
     port: process.env.REDIS_PORT || 6379,
+    retryDelayOnFailure: 1000,
+    maxRetriesPerRequest: 3,
+  },
+  defaultJobOptions: {
+    removeOnComplete: 10,
+    removeOnFail: 5,
   },
 });
 

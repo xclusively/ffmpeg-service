@@ -12,11 +12,12 @@ services:
     restart: unless-stopped
     depends_on:
       - ffmpeg-worker
-      - redis
     environment:
       - NODE_ENV=production
-      - REDIS_HOST=redis
+      - REDIS_HOST=infrastructure-redis-1 # ✅ Use your existing Redis container name
       - REDIS_PORT=6379
+    external_links:
+      - infrastructure-redis-1:redis # ✅ Link to existing Redis
 
   ffmpeg-worker:
     image: jrottenberg/ffmpeg:latest
@@ -28,18 +29,8 @@ services:
     entrypoint: ["sh"]
     command: ["-c", "while true; do sleep 30; done"]
 
-  redis:
-    image: redis:7-alpine
-    networks:
-      - cent-stage-network
-    restart: unless-stopped
-    volumes:
-      - redis-data:/data
-
 volumes:
   video-temp:
-    driver: local
-  redis-data:
     driver: local
 
 networks:
