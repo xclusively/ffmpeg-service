@@ -12,8 +12,11 @@ services:
     restart: unless-stopped
     depends_on:
       - ffmpeg-worker
+      - redis
     environment:
       - NODE_ENV=production
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
 
   ffmpeg-worker:
     image: jrottenberg/ffmpeg:latest
@@ -22,11 +25,21 @@ services:
     networks:
       - cent-stage-network
     restart: unless-stopped
-    entrypoint: ["sh"] # ✅ Override ffmpeg entrypoint
-    command: ["-c", "while true; do sleep 30; done"] # ✅ Shell command
+    entrypoint: ["sh"]
+    command: ["-c", "while true; do sleep 30; done"]
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - cent-stage-network
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
 
 volumes:
   video-temp:
+    driver: local
+  redis-data:
     driver: local
 
 networks:

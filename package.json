@@ -20,10 +20,13 @@
   },
   "homepage": "https://github.com/gulsherkooner/ffmpeg-service#readme",
   "dependencies": {
+    "bull": "^4.16.5",
     "cors": "^2.8.5",
     "dropbox": "^10.34.0",
     "express": "^4.18.2",
+    "ioredis": "^5.8.1",
     "node-fetch": "^2.6.12",
+    "redis": "^5.8.3",
     "winston": "^3.10.0"
   },
   "devDependencies": {

@@ -3,20 +3,75 @@ const util = require("util");
 const fs = require("fs");
 const path = require("path");
 const fetch = require("node-fetch");
+const Queue = require("bull");
 const dropboxService = require("./dropboxService");
 const logger = require("../config/logger");
 
 const execAsync = util.promisify(exec);
 const SHARED_VIDEO_PATH = "/tmp/videos";
 
+// Create Redis queue
+const transcodeQueue = new Queue("video transcoding", {
+  redis: {
+    host: process.env.REDIS_HOST || "redis",
+    port: process.env.REDIS_PORT || 6379,
+  },
+});
+
 class FFmpegService {
+  constructor() {
+    this.setupQueue();
+  }
+
+  setupQueue() {
+    // Process queue with concurrency of 1 (one user at a time)
+    transcodeQueue.process("transcode-user", 1, async (job) => {
+      return await this.processVideoVariants(job.data);
+    });
+
+    // Queue event listeners
+    transcodeQueue.on("completed", (job, result) => {
+      logger.info(`Job ${job.id} completed for ${job.data.fileName}`);
+    });
+
+    transcodeQueue.on("failed", (job, err) => {
+      logger.error(
+        `Job ${job.id} failed for ${job.data.fileName}: ${err.message}`
+      );
+    });
+
+    transcodeQueue.on("stalled", (job) => {
+      logger.warn(`Job ${job.id} stalled for ${job.data.fileName}`);
+    });
+  }
+
+  // Public method - adds job to queue
+  async queueTranscoding(options) {
+    const job = await transcodeQueue.add("transcode-user", options, {
+      priority: 1,
+      attempts: 3,
+      backoff: {
+        type: "exponential",
+        delay: 2000,
+      },
+      removeOnComplete: 10, // Keep last 10 completed jobs
+      removeOnFail: 5, // Keep last 5 failed jobs
+    });
+
+    logger.info(`Queued transcoding job ${job.id} for ${options.fileName}`);
+    return { jobId: job.id, status: "queued" };
+  }
+
+  // Private method - actual processing (now with concurrent resolutions)
   async processVideoVariants(options) {
     const { originalUrl, fileName, baseName, timestamp, dbxAccessToken } =
       options;
     let tempFiles = [];
 
     try {
-      logger.info(`Starting transcoding process for ${fileName}`);
+      logger.info(
+        `Starting transcoding process for ${fileName} (Job processing)`
+      );
 
       // 1. Download original video from Dropbox
       const inputBuffer = await this.downloadFromDropbox(originalUrl);
@@ -49,19 +104,23 @@ class FFmpegService {
       // 5. Get optimal targets
       const targets = this.getOptimalTargets(probe.width, probe.height, paths);
 
-      // 6. Process each variant
-      for (const target of targets) {
-        await this.processVariantWithFallbacks(
+      // 6. ✅ Process ALL variants CONCURRENTLY (for same user)
+      const variantPromises = targets.map((target) =>
+        this.processVariantWithFallbacks(
           target,
           inputFile,
           tempId,
           probe.hasAudio,
-          tempFiles,
+          [...tempFiles], // Copy array to avoid conflicts
           dbxAccessToken
-        );
-      }
+        )
+      );
+
+      // Wait for all variants to complete
+      await Promise.allSettled(variantPromises);
 
       logger.info(`Transcoding completed successfully for ${fileName}`);
+      return { success: true, variants: targets.length };
     } catch (error) {
       logger.error(`Transcoding process failed: ${error.message}`);
       throw error;
@@ -69,6 +128,39 @@ class FFmpegService {
       // Cleanup temp files
       this.cleanupTempFiles(tempFiles);
     }
+  }
+
+  // Get queue status
+  async getQueueStatus() {
+    const waiting = await transcodeQueue.getWaiting();
+    const active = await transcodeQueue.getActive();
+    const completed = await transcodeQueue.getCompleted();
+    const failed = await transcodeQueue.getFailed();
+
+    return {
+      waiting: waiting.length,
+      active: active.length,
+      completed: completed.length,
+      failed: failed.length,
+    };
+  }
+
+  // Get specific job status
+  async getJobStatus(jobId) {
+    const job = await transcodeQueue.getJob(jobId);
+    if (!job) {
+      return { status: "not_found" };
+    }
+
+    return {
+      id: job.id,
+      status: await job.getState(),
+      progress: job.progress(),
+      data: job.data,
+      createdAt: new Date(job.timestamp),
+      processedAt: job.processedOn ? new Date(job.processedOn) : null,
+      finishedAt: job.finishedOn ? new Date(job.finishedOn) : null,
+    };
   }
 
   async downloadFromDropbox(url) {
@@ -105,7 +197,6 @@ class FFmpegService {
       };
     } catch (error) {
       logger.error(`Video probe failed: ${error.message}`);
-      // Return safe defaults
       return {
         height: 720,
         width: 1280,
@@ -120,23 +211,15 @@ class FFmpegService {
   getOptimalTargets(width, height, paths) {
     const targets = [];
 
-    // Create ALL variants that are smaller than the original
-    // 1080p: Create if original is larger than 1080p
     if (height > 1080 || width > 1920) {
       targets.push({ h: 1080, key: "p1080", path: paths.p1080 });
     }
-
-    // 720p: Create if original is larger than 720p
     if (height > 720 || width > 1280) {
       targets.push({ h: 720, key: "p720", path: paths.p720 });
     }
-
-    // 480p: Create if original is larger than 480p
     if (height > 480 || width > 854) {
       targets.push({ h: 480, key: "p480", path: paths.p480 });
     }
-
-    // 360p: Create if original is larger than 360p
     if (height > 360 || width > 640) {
       targets.push({ h: 360, key: "p360", path: paths.p360 });
     }
@@ -160,11 +243,11 @@ class FFmpegService {
   ) {
     logger.info(`Transcoding ${target.h}p`);
 
+    // Create unique output file for this variant
     const outputFile = `output-${tempId}-${target.h}p.mp4`;
     const outputPath = path.join(SHARED_VIDEO_PATH, outputFile);
     tempFiles.push(outputPath);
 
-    // Multiple fallback strategies
     const strategies = [
       () => this.transcodeOptimal(inputFile, outputFile, target.h, hasAudio),
       () =>
@@ -178,11 +261,9 @@ class FFmpegService {
       try {
         await strategies[i]();
 
-        // Verify output
         if (fs.existsSync(outputPath)) {
           const stats = fs.statSync(outputPath);
           if (stats.size > 1024) {
-            // Upload to Dropbox
             const transcodedBuffer = fs.readFileSync(outputPath);
             await dropboxService.uploadBuffer(
               transcodedBuffer,
@@ -195,7 +276,7 @@ class FFmpegService {
                 stats.size
               } bytes)`
             );
-            return; // Success
+            return;
           }
         }
       } catch (e) {
@@ -206,7 +287,7 @@ class FFmpegService {
     logger.error(`All strategies failed for ${target.h}p`);
   }
 
-  // Transcoding strategies
+  // Transcoding strategies (unchanged)
   async transcodeOptimal(inputFile, outputFile, height, hasAudio) {
     let cmd =
       `docker exec ffmpeg-service-ffmpeg-worker-1 ffmpeg -i /tmp/videos/${inputFile} ` +
