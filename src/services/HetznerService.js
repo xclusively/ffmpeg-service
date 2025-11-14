@@ -1,5 +1,6 @@
 const fetch = require("node-fetch");
 const logger = require("../config/logger");
+const { s3Client } = require("../utils/s3Client");
 const { PutObjectCommand } = require("@aws-sdk/client-s3");
 
 class HetznerService {
@@ -13,9 +14,9 @@ class HetznerService {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            pathLower,
+            fileKey: pathLower,
             fileType: "application/octet-stream",
-            expireIn: 600,
+            expiresIn: 600,
           }),
         }
       );
