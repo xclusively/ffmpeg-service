@@ -31,7 +31,6 @@ class HetznerService {
       const bucket = process.env.HETZNER_BUCKET;
       logger.info(`Received upload URL from auth-service.`, {
         bucket,
-        pathLower,
       });
       const command = new PutObjectCommand({
         Bucket: process.env.HETZNER_BUCKET,

@@ -13,6 +13,8 @@ app.use(corsMiddleware);
 app.use(express.json({ limit: "500mb" }));
 app.use(express.urlencoded({ extended: true, limit: "500mb" }));
 
+console.log(process.env.HETZNER_BUCKET);
+
 // Routes
 app.use("/transcode", transcodeRouter);
 
