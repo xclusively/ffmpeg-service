@@ -5,7 +5,7 @@ services:
     env_file:
       - /root/cent-stage/ffmpeg-service/.env
     ports:
-      - "8567:8567"
+      - '8567:8567'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - video-temp:/tmp/videos
@@ -28,8 +28,8 @@ services:
     networks:
       - cent-stage-network
     restart: unless-stopped
-    entrypoint: ["sh"]
-    command: ["-c", "while true; do sleep 30; done"]
+    entrypoint: ['sh']
+    command: ['-c', 'while true; do sleep 30; done']
 
 volumes:
   video-temp:
