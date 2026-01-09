@@ -12,8 +12,6 @@ services:
     networks:
       - xclusively-network
     restart: unless-stopped
-    depends_on:
-      - ffmpeg-worker
     environment:
       - NODE_ENV=production
       - REDIS_HOST=redis # ✅ Use your existing Redis container name
