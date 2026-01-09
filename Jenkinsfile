@@ -53,7 +53,12 @@ pipeline {
                         fi
                         
                         # 3. Start the NEW container
-                        docker-compose up -d --no-deps ${SERVICE_NAME}
+                        docker run -d \
+                            --name ${CONTAINER_NAME} \
+                            --network xclusively-network \
+                            --env-file /home/devops/xclusively/${SERVICE_NAME}/.env \
+                            --restart unless-stopped \
+                            ${FULL_IMAGE}
                         
                         # 4. Verification/Health Check
                         echo "Waiting for health check..."
