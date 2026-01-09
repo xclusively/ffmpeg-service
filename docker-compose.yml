@@ -21,16 +21,6 @@ services:
     external_links:
       - redis:redis # ✅ Link to existing Redis
 
-  ffmpeg-worker:
-    image: jrottenberg/ffmpeg:latest
-    volumes:
-      - video-temp:/tmp/videos
-    networks:
-      - xclusively-network
-    restart: unless-stopped
-    entrypoint: ["sh"]
-    command: ["-c", "while true; do sleep 30; done"]
-
 volumes:
   video-temp:
     driver: local
