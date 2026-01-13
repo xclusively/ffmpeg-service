@@ -22,13 +22,8 @@ console.log(process.env.HETZNER_BUCKET);
 app.use('/transcode', transcodeRouter);
 
 // Health check
-app.get('/health', (req, res) => {
-  res.json({
-    success: true,
-    service: 'ffmpeg-service',
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-  });
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
 });
 
 // Error handling

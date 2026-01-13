@@ -3,38 +3,26 @@ services:
     build: .
     image: ffmpeg-service:latest
     env_file:
-      - /root/cent-stage/ffmpeg-service/.env
+      - /home/devops/xclusively/ffmpeg-service/.env
     ports:
       - '8567:8567'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - video-temp:/tmp/videos
     networks:
-      - cent-stage-network
+      - xclusively-network
     restart: unless-stopped
-    depends_on:
-      - ffmpeg-worker
     environment:
       - NODE_ENV=production
-      - REDIS_HOST=infrastructure-redis-1 # ✅ Use your existing Redis container name
+      - REDIS_HOST=redis # ✅ Use your existing Redis container name
       - REDIS_PORT=6379
     external_links:
-      - infrastructure-redis-1:redis # ✅ Link to existing Redis
-
-  ffmpeg-worker:
-    image: jrottenberg/ffmpeg:latest
-    volumes:
-      - video-temp:/tmp/videos
-    networks:
-      - cent-stage-network
-    restart: unless-stopped
-    entrypoint: ['sh']
-    command: ['-c', 'while true; do sleep 30; done']
+      - redis:redis # ✅ Link to existing Redis
 
 volumes:
   video-temp:
     driver: local
 
 networks:
-  cent-stage-network:
+  xclusively-network:
     external: true
