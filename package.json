@@ -28,7 +28,7 @@
   },
   "homepage": "https://github.com/gulsherkooner/ffmpeg-service#readme",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.931.0",
+    "@aws-sdk/client-s3": "^3.968.0",
     "body-parser": "^2.2.2",
     "bull": "^4.16.5",
     "cors": "^2.8.5",
