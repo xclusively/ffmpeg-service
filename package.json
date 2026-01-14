@@ -38,7 +38,7 @@
     "ioredis": "^5.8.1",
     "node-fetch": "^2.6.12",
     "redis": "^5.8.3",
-    "winston": "^3.10.0"
+    "winston": "^3.19.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
