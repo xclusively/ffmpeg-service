@@ -24,7 +24,6 @@ const UploadToDropbox = async (fileContent, fileName, dbxAccessToken, res) => {
     return directUrl;
   } catch (error) {
     logger.error(`Error uploading to Dropbox: ${error.message}`);
-    console.error('Error uploading to Dropbox:', error);
     res.status(500).json({ error: 'Failed to upload to Dropbox' });
     return error;
   }
