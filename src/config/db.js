@@ -7,7 +7,7 @@ const sequelize = new Sequelize({
   database: process.env.POSTGRES_DB || 'my-app',
   username: process.env.POSTGRES_USER || 'postgres',
   password: process.env.POSTGRES_PASSWORD,
-  logging: process.env.NODE_ENV === 'development' ? console.log : false,
+  logging: process.env.NODE_ENV === 'development' ? true : false,
 });
 
 module.exports = sequelize;

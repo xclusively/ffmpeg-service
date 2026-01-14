@@ -1,17 +1,17 @@
-const express = require("express");
+const express = require('express');
 const router = express.Router();
-const ffmpegService = require("../services/ffmpegService");
-const logger = require("../config/logger");
+const ffmpegService = require('../services/ffmpegService');
+const logger = require('../config/logger');
 
 // POST /transcode - Queue transcoding job
-router.post("/", async (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const { fileKey, mediaContent } = req.body;
 
     if (!fileKey || !mediaContent) {
       return res.status(400).json({
         success: false,
-        error: "Missing required fields: fileKey, mediaContent",
+        error: 'Missing required fields: fileKey, mediaContent',
       });
     }
 
@@ -26,22 +26,22 @@ router.post("/", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Transcoding job queued successfully",
+      message: 'Transcoding job queued successfully',
       jobId: result.jobId,
       status: result.status,
-      fileName,
+      fileKey,
     });
   } catch (error) {
     logger.error(`Transcode route error: ${error.message}`);
     res.status(500).json({
       success: false,
-      error: "Failed to queue transcoding job",
+      error: 'Failed to queue transcoding job',
     });
   }
 });
 
 // GET /status/:jobId - Check job status
-router.get("/status/:jobId", async (req, res) => {
+router.get('/status/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
     const status = await ffmpegService.getJobStatus(jobId);
@@ -54,13 +54,13 @@ router.get("/status/:jobId", async (req, res) => {
     logger.error(`Status check error: ${error.message}`);
     res.status(500).json({
       success: false,
-      error: "Failed to get job status",
+      error: 'Failed to get job status',
     });
   }
 });
 
 // GET /queue - Get queue status
-router.get("/queue", async (req, res) => {
+router.get('/queue', async (req, res) => {
   try {
     const status = await ffmpegService.getQueueStatus();
     res.json({
@@ -71,17 +71,17 @@ router.get("/queue", async (req, res) => {
     logger.error(`Queue status error: ${error.message}`);
     res.status(500).json({
       success: false,
-      error: "Failed to get queue status",
+      error: 'Failed to get queue status',
     });
   }
 });
 
 // GET /health - Health check
-router.get("/health", (req, res) => {
+router.get('/health', (req, res) => {
   res.json({
     success: true,
-    service: "ffmpeg-service",
-    status: "healthy",
+    service: 'ffmpeg-service',
+    status: 'healthy',
     timestamp: new Date().toISOString(),
   });
 });

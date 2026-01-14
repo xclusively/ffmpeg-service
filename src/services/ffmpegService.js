@@ -1,18 +1,18 @@
-const { exec } = require("child_process");
-const util = require("util");
-const fs = require("fs");
-const path = require("path");
-const Queue = require("bull");
-const HetznerService = require("./HetznerService");
-const logger = require("../config/logger");
-const { Readable } = require("stream");
+const { exec } = require('child_process');
+const util = require('util');
+const fs = require('fs');
+const path = require('path');
+const Queue = require('bull');
+const HetznerService = require('./HetznerService');
+const logger = require('../config/logger');
+const { Readable } = require('stream');
 
 const execAsync = util.promisify(exec);
-const SHARED_VIDEO_PATH = "/tmp/videos";
+const SHARED_VIDEO_PATH = '/tmp/videos';
 
-const transcodeQueue = new Queue("video transcoding", {
+const transcodeQueue = new Queue('video transcoding', {
   redis: {
-    host: process.env.REDIS_HOST || "host.docker.internal",
+    host: process.env.REDIS_HOST || 'host.docker.internal',
     port: process.env.REDIS_PORT || 6379,
     retryDelayOnFailure: 1000,
     maxRetriesPerRequest: 3,
@@ -29,31 +29,30 @@ class FFmpegService {
   }
 
   setupQueue() {
-    transcodeQueue.process("transcode-user", 1, async (job) => {
+    transcodeQueue.process('transcode-user', 1, async (job) => {
       return await this.processVideoVariants(job.data);
     });
 
-    transcodeQueue.on("completed", (job, result) => {
+    // eslint-disable-next-line unused-imports/no-unused-vars
+    transcodeQueue.on('completed', (job, result) => {
       logger.info(`Job ${job.id} completed for ${job.data.fileKey}`);
     });
 
-    transcodeQueue.on("failed", (job, err) => {
-      logger.error(
-        `Job ${job.id} failed for ${job.data.fileKey}: ${err.message}`
-      );
+    transcodeQueue.on('failed', (job, err) => {
+      logger.error(`Job ${job.id} failed for ${job.data.fileKey}: ${err.message}`);
     });
 
-    transcodeQueue.on("stalled", (job) => {
+    transcodeQueue.on('stalled', (job) => {
       logger.warn(`Job ${job.id} stalled for ${job.data.fileKey}`);
     });
   }
 
   async queueTranscoding(options) {
-    const job = await transcodeQueue.add("transcode-user", options, {
+    const job = await transcodeQueue.add('transcode-user', options, {
       priority: 1,
       attempts: 3,
       backoff: {
-        type: "exponential",
+        type: 'exponential',
         delay: 2000,
       },
       removeOnComplete: 10,
@@ -61,7 +60,7 @@ class FFmpegService {
     });
 
     logger.info(`Queued transcoding job ${job.id} for ${options.fileKey}`);
-    return { jobId: job.id, status: "queued" };
+    return { jobId: job.id, status: 'queued' };
   }
 
   async processVideoVariants(options) {
@@ -70,9 +69,7 @@ class FFmpegService {
     let inputPath = null;
 
     try {
-      logger.info(
-        `Starting transcoding process for ${fileKey} (Job processing)`
-      );
+      logger.info(`Starting transcoding process for ${fileKey} (Job processing)`);
 
       // 1. Download and create input file as stream
       const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
@@ -84,28 +81,26 @@ class FFmpegService {
       }
 
       // Download as stream and save to file
-      const buffer = Buffer.from(mediaContent, "base64");
+      const buffer = Buffer.from(mediaContent, 'base64');
       await new Promise((resolve, reject) => {
         const readable = Readable.from(buffer);
         const writeStream = fs.createWriteStream(inputPath);
         readable.pipe(writeStream);
-        readable.on("error", reject);
-        writeStream.on("finish", resolve);
-        writeStream.on("error", reject);
+        readable.on('error', reject);
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
       });
 
       // 2. Probe video
       const probe = await this.probeVideo(inputFile);
-      logger.info(
-        `Video probe: ${probe.width}x${probe.height}, audio=${probe.hasAudio}`
-      );
+      logger.info(`Video probe: ${probe.width}x${probe.height}, audio=${probe.hasAudio}`);
 
       // 3. Define targets and output paths
       const paths = {
-        p1080: `${fileKey.replace("original", "1080p")}`,
-        p720: `${fileKey.replace("original", "720p")}`,
-        p480: `${fileKey.replace("original", "480p")}`,
-        p360: `${fileKey.replace("original", "360p")}`,
+        p1080: `${fileKey.replace('original', '1080p')}`,
+        p720: `${fileKey.replace('original', '720p')}`,
+        p480: `${fileKey.replace('original', '480p')}`,
+        p360: `${fileKey.replace('original', '360p')}`,
       };
       const targets = this.getOptimalTargets(probe.width, probe.height, paths);
 
@@ -157,7 +152,7 @@ class FFmpegService {
   async getJobStatus(jobId) {
     const job = await transcodeQueue.getJob(jobId);
     if (!job) {
-      return { status: "not_found" };
+      return { status: 'not_found' };
     }
 
     return {
@@ -177,18 +172,18 @@ class FFmpegService {
       const { stdout } = await execAsync(cmd, { timeout: 30000 });
       const probe = JSON.parse(stdout);
 
-      const videoStream = probe.streams.find((s) => s.codec_type === "video");
+      const videoStream = probe.streams.find((s) => s.codec_type === 'video');
       if (!videoStream) {
-        throw new Error("No video stream found");
+        throw new Error('No video stream found');
       }
 
       return {
         height: videoStream.height || 720,
         width: videoStream.width || 1280,
         duration: parseFloat(probe.format?.duration || 0),
-        hasAudio: probe.streams.some((s) => s.codec_type === "audio"),
-        codec: videoStream.codec_name || "unknown",
-        fps: parseFloat(videoStream.r_frame_rate?.split("/")[0] || 30),
+        hasAudio: probe.streams.some((s) => s.codec_type === 'audio'),
+        codec: videoStream.codec_name || 'unknown',
+        fps: parseFloat(videoStream.r_frame_rate?.split('/')[0] || 30),
       };
     } catch (error) {
       logger.error(`Video probe failed: ${error.message}`);
@@ -197,7 +192,7 @@ class FFmpegService {
         width: 1280,
         duration: 0,
         hasAudio: false,
-        codec: "unknown",
+        codec: 'unknown',
         fps: 30,
       };
     }
@@ -207,42 +202,35 @@ class FFmpegService {
     const targets = [];
 
     if (height > 1080 || width > 1920) {
-      targets.push({ h: 1080, key: "p1080", path: paths.p1080 });
+      targets.push({ h: 1080, key: 'p1080', path: paths.p1080 });
     }
     if (height > 720 || width > 1280) {
-      targets.push({ h: 720, key: "p720", path: paths.p720 });
+      targets.push({ h: 720, key: 'p720', path: paths.p720 });
     }
     if (height > 480 || width > 854) {
-      targets.push({ h: 480, key: "p480", path: paths.p480 });
+      targets.push({ h: 480, key: 'p480', path: paths.p480 });
     }
     if (height > 360 || width > 640) {
-      targets.push({ h: 360, key: "p360", path: paths.p360 });
+      targets.push({ h: 360, key: 'p360', path: paths.p360 });
     }
 
     logger.info(
       `Original: ${width}x${height} -> Creating variants: ${targets
-        .map((t) => t.h + "p")
-        .join(", ")}`
+        .map((t) => t.h + 'p')
+        .join(', ')}`
     );
 
     return targets;
   }
 
-  async processVariantWithFallbacks(
-    target,
-    inputFile,
-    tempId,
-    hasAudio,
-    outputPath
-  ) {
+  async processVariantWithFallbacks(target, inputFile, tempId, hasAudio, outputPath) {
     logger.info(`Transcoding ${target.h}p`);
 
     const outputFile = path.basename(outputPath);
 
     const strategies = [
       () => this.transcodeOptimal(inputFile, outputFile, target.h, hasAudio),
-      () =>
-        this.transcodeConservative(inputFile, outputFile, target.h, hasAudio),
+      () => this.transcodeConservative(inputFile, outputFile, target.h, hasAudio),
       () => this.transcodeSimple(inputFile, outputFile, target.h, hasAudio),
       () => this.transcodeCopy(inputFile, outputFile, target.h),
       () => this.transcodeLastResort(inputFile, outputFile, target.h),
@@ -259,9 +247,7 @@ class FFmpegService {
             await HetznerService.uploadBuffer(transcodedBuffer, target.path);
 
             logger.info(
-              `Uploaded ${target.h}p ${target.path} (strategy ${i + 1}, size: ${
-                stats.size
-              } bytes)`
+              `Uploaded ${target.h}p ${target.path} (strategy ${i + 1}, size: ${stats.size} bytes)`
             );
             return;
           }
