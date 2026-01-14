@@ -29,11 +29,12 @@
   "homepage": "https://github.com/gulsherkooner/ffmpeg-service#readme",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.931.0",
+    "body-parser": "^2.2.2",
     "bull": "^4.16.5",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "dropbox": "^10.34.0",
-    "express": "^4.18.2",
+    "express": "^4.22.1",
     "ioredis": "^5.8.1",
     "node-fetch": "^2.6.12",
     "redis": "^5.8.3",
