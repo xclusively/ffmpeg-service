@@ -173,7 +173,7 @@ class FFmpegService {
 
   async probeVideo(inputFile) {
     try {
-      const cmd = `docker exec ffmpeg-service-ffmpeg-worker-1 ffprobe -v quiet -print-format json -show-format -show-streams /tmp/videos/${inputFile}`;
+      const cmd = `docker exec ffmpeg-worker ffprobe -v quiet -print-format json -show-format -show-streams /tmp/videos/${inputFile}`;
       const { stdout } = await execAsync(cmd, { timeout: 30000 });
       const probe = JSON.parse(stdout);
 
@@ -276,7 +276,7 @@ class FFmpegService {
 
   async transcodeOptimal(inputFile, outputFile, height, hasAudio) {
     let cmd =
-      `docker exec ffmpeg-service-ffmpeg-worker-1 ffmpeg -i /tmp/videos/${inputFile} ` +
+      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
       `-vf "scale=-2:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2" ` +
       `-c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -profile:v main -level 4.0 ` +
       `-movflags +faststart -g 48 -keyint_min 48 `;
@@ -293,7 +293,7 @@ class FFmpegService {
 
   async transcodeConservative(inputFile, outputFile, height, hasAudio) {
     let cmd =
-      `docker exec ffmpeg-service-ffmpeg-worker-1 ffmpeg -i /tmp/videos/${inputFile} ` +
+      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
       `-vf "scale=trunc(oh*a/2)*2:${height}" ` +
       `-c:v libx264 -preset medium -crf 25 -pix_fmt yuv420p ` +
       `-movflags +faststart `;
@@ -310,7 +310,7 @@ class FFmpegService {
 
   async transcodeSimple(inputFile, outputFile, height, hasAudio) {
     let cmd =
-      `docker exec ffmpeg-service-ffmpeg-worker-1 ffmpeg -i /tmp/videos/${inputFile} ` +
+      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
       `-vf "scale=-1:${height}" ` +
       `-c:v libx264 -preset ultrafast -crf 30 `;
 
@@ -326,7 +326,7 @@ class FFmpegService {
 
   async transcodeCopy(inputFile, outputFile, height) {
     const cmd =
-      `docker exec ffmpeg-service-ffmpeg-worker-1 ffmpeg -i /tmp/videos/${inputFile} ` +
+      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
       `-vf "scale=-1:${height}" ` +
       `-c copy ` +
       `-y /tmp/videos/${outputFile}`;
@@ -335,7 +335,7 @@ class FFmpegService {
 
   async transcodeLastResort(inputFile, outputFile, height) {
     const cmd =
-      `docker exec ffmpeg-service-ffmpeg-worker-1 ffmpeg -i /tmp/videos/${inputFile} ` +
+      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
       `-vf "scale=${(height * 16) / 9}:${height}" ` +
       `-c:v mpeg4 -b:v 1000k ` +
       `-c:a mp3 -b:a 128k ` +
