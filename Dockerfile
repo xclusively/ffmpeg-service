@@ -10,7 +10,7 @@ RUN apt-get update && \
 
 # Copy package files
 COPY package*.json ./
-RUN npm install --production
+RUN npm install
 
 # Copy source code
 COPY index.js ./
