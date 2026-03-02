@@ -37,10 +37,6 @@ pipeline {
         stage('Deploy') {
             steps {
                 script {
-                    if (env.BRANCH_NAME == 'main') {
-                        input message: "Deploy ${IMAGE_TAG} to Production?", ok: "Deploy"
-                    }
-                    
                     sh """
                         # 1. Pull the new image
                         docker pull ${FULL_IMAGE}
