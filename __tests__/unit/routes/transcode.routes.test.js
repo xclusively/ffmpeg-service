@@ -8,6 +8,9 @@
 const request = require('supertest');
 const express = require('express');
 
+process.env.INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || 'test-internal-token';
+process.env.JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || 'test-jwt-secret';
+
 // Mock logger before requiring routes
 jest.mock('../../../src/config/logger', () => ({
   info: jest.fn(),
@@ -45,6 +48,7 @@ describe('Transcode Routes', () => {
 
       const res = await request(app)
         .post('/transcode')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
         .send({ fileKey: 'original/video.mp4', mediaContent: 'base64data' })
         .expect(200);
 
@@ -63,6 +67,7 @@ describe('Transcode Routes', () => {
     test('should return 400 when fileKey is missing', async () => {
       const res = await request(app)
         .post('/transcode')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
         .send({ mediaContent: 'base64data' })
         .expect(400);
 
@@ -74,6 +79,7 @@ describe('Transcode Routes', () => {
     test('should return 400 when mediaContent is missing', async () => {
       const res = await request(app)
         .post('/transcode')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
         .send({ fileKey: 'original/video.mp4' })
         .expect(400);
 
@@ -83,7 +89,11 @@ describe('Transcode Routes', () => {
     });
 
     test('should return 400 when body is empty', async () => {
-      const res = await request(app).post('/transcode').send({}).expect(400);
+      const res = await request(app)
+        .post('/transcode')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
+        .send({})
+        .expect(400);
 
       expect(res.body.success).toBe(false);
     });
@@ -93,6 +103,7 @@ describe('Transcode Routes', () => {
 
       const res = await request(app)
         .post('/transcode')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
         .send({ fileKey: 'original/video.mp4', mediaContent: 'base64data' })
         .expect(500);
 
@@ -114,7 +125,10 @@ describe('Transcode Routes', () => {
         finishedAt: new Date('2024-01-01'),
       });
 
-      const res = await request(app).get('/transcode/status/job-123').expect(200);
+      const res = await request(app)
+        .get('/transcode/status/job-123')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
+        .expect(200);
 
       expect(res.body.success).toBe(true);
       expect(res.body.job.id).toBe('job-123');
@@ -125,7 +139,10 @@ describe('Transcode Routes', () => {
     test('should return not_found status when job does not exist', async () => {
       mockFfmpegService.getJobStatus.mockResolvedValue({ status: 'not_found' });
 
-      const res = await request(app).get('/transcode/status/nonexistent-job').expect(200);
+      const res = await request(app)
+        .get('/transcode/status/nonexistent-job')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
+        .expect(200);
 
       expect(res.body.success).toBe(true);
       expect(res.body.job.status).toBe('not_found');
@@ -134,7 +151,10 @@ describe('Transcode Routes', () => {
     test('should return 500 when getJobStatus throws an error', async () => {
       mockFfmpegService.getJobStatus.mockRejectedValue(new Error('Queue unreachable'));
 
-      const res = await request(app).get('/transcode/status/job-error').expect(500);
+      const res = await request(app)
+        .get('/transcode/status/job-error')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
+        .expect(500);
 
       expect(res.body.success).toBe(false);
       expect(res.body.error).toBe('Failed to get job status');
@@ -151,7 +171,10 @@ describe('Transcode Routes', () => {
         failed: 2,
       });
 
-      const res = await request(app).get('/transcode/queue').expect(200);
+      const res = await request(app)
+        .get('/transcode/queue')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
+        .expect(200);
 
       expect(res.body.success).toBe(true);
       expect(res.body.queue.waiting).toBe(3);
@@ -163,7 +186,10 @@ describe('Transcode Routes', () => {
     test('should return 500 when getQueueStatus throws an error', async () => {
       mockFfmpegService.getQueueStatus.mockRejectedValue(new Error('Queue unreachable'));
 
-      const res = await request(app).get('/transcode/queue').expect(500);
+      const res = await request(app)
+        .get('/transcode/queue')
+        .set('x-internal-token', process.env.INTERNAL_TOKEN)
+        .expect(500);
 
       expect(res.body.success).toBe(false);
       expect(res.body.error).toBe('Failed to get queue status');

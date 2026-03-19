@@ -2,6 +2,20 @@ const express = require('express');
 const router = express.Router();
 const ffmpegService = require('../services/ffmpegService');
 const logger = require('../config/logger');
+const { verifyToken } = require('../middleware/auth');
+
+// GET /health - Health check (public)
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    service: 'ffmpeg-service',
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Protect all other routes
+router.use(verifyToken);
 
 // POST /transcode - Queue transcoding job
 router.post('/', async (req, res) => {
@@ -74,16 +88,6 @@ router.get('/queue', async (req, res) => {
       error: 'Failed to get queue status',
     });
   }
-});
-
-// GET /health - Health check
-router.get('/health', (req, res) => {
-  res.json({
-    success: true,
-    service: 'ffmpeg-service',
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-  });
 });
 
 module.exports = router;
