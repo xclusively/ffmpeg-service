@@ -42,7 +42,6 @@ class FFmpegService {
       return await this.processVideoVariants(job.data);
     });
 
-     
     transcodeQueue.on('completed', (job, result) => {
       logger.info(`Job ${job.id} completed for ${job.data.fileKey} — variants: ${result.variants}`);
     });
