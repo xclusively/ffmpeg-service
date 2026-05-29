@@ -183,9 +183,10 @@ describe('FFmpegService – Internal Methods', () => {
     test('returns safe defaults when probe output has no video stream', async () => {
       makeExecSucceed(JSON.stringify({ streams: [{ codec_type: 'audio' }], format: {} }));
       const result = await ffmpegService.probeVideo('audio-only.mp4');
+      // height=0 means "no video stream found" — processVideoVariants will skip transcoding
       expect(result).toMatchObject({
-        height: 720,
-        width: 1280,
+        height: 0,
+        width: 0,
         duration: 0,
         hasAudio: false,
         codec: 'unknown',
@@ -197,8 +198,8 @@ describe('FFmpegService – Internal Methods', () => {
       makeExecFail('ffprobe: command not found');
       const result = await ffmpegService.probeVideo('bad.mp4');
       expect(result).toMatchObject({
-        height: 720,
-        width: 1280,
+        height: 0,
+        width: 0,
         duration: 0,
         hasAudio: false,
         codec: 'unknown',
@@ -209,7 +210,7 @@ describe('FFmpegService – Internal Methods', () => {
     test('returns safe defaults on invalid JSON output', async () => {
       makeExecSucceed('{not:valid:json}');
       const result = await ffmpegService.probeVideo('corrupt.mp4');
-      expect(result.height).toBe(720);
+      expect(result.height).toBe(0);
       expect(result.codec).toBe('unknown');
     });
 
@@ -224,17 +225,18 @@ describe('FFmpegService – Internal Methods', () => {
     });
   });
 
-  // ─── cleanupSingleFile ─────────────────────────────────────────────────────
-  describe('cleanupSingleFile()', () => {
+  // ─── cleanupFile ──────────────────────────────────────────────────────────
+  // Renamed from cleanupSingleFile to cleanupFile
+  describe('cleanupFile()', () => {
     test('unlinks file when it exists', () => {
       mockFs.existsSync.mockReturnValue(true);
-      ffmpegService.cleanupSingleFile('/tmp/videos/output.mp4');
+      ffmpegService.cleanupFile('/tmp/videos/output.mp4');
       expect(mockFs.unlinkSync).toHaveBeenCalledWith('/tmp/videos/output.mp4');
     });
 
     test('does nothing when file does not exist', () => {
       mockFs.existsSync.mockReturnValue(false);
-      ffmpegService.cleanupSingleFile('/tmp/videos/missing.mp4');
+      ffmpegService.cleanupFile('/tmp/videos/missing.mp4');
       expect(mockFs.unlinkSync).not.toHaveBeenCalled();
     });
 
@@ -243,15 +245,16 @@ describe('FFmpegService – Internal Methods', () => {
       mockFs.unlinkSync.mockImplementationOnce(() => {
         throw new Error('EPERM: operation not permitted');
       });
-      expect(() => ffmpegService.cleanupSingleFile('/tmp/videos/locked.mp4')).not.toThrow();
+      expect(() => ffmpegService.cleanupFile('/tmp/videos/locked.mp4')).not.toThrow();
     });
   });
 
-  // ─── transcodeOptimal ──────────────────────────────────────────────────────
-  describe('transcodeOptimal()', () => {
+  // ─── strategyOptimal ──────────────────────────────────────────────────────
+  // Renamed from transcodeOptimal
+  describe('strategyOptimal()', () => {
     test('builds aac audio command when hasAudio is true', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeOptimal('in.mp4', 'out.mp4', 720, true);
+      await ffmpegService.strategyOptimal('in.mp4', 'out.mp4', 720, true);
       const cmd = mockExec.mock.calls[0][0];
       expect(cmd).toContain('-c:a aac');
       expect(cmd).toContain('scale=-2:720');
@@ -260,64 +263,73 @@ describe('FFmpegService – Internal Methods', () => {
 
     test('builds no-audio command when hasAudio is false', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeOptimal('in.mp4', 'out.mp4', 480, false);
+      await ffmpegService.strategyOptimal('in.mp4', 'out.mp4', 480, false);
       expect(mockExec.mock.calls[0][0]).toContain('-an');
     });
 
     test('rejects when exec fails', async () => {
       makeExecFail('ffmpeg signal SIGKILL');
-      await expect(ffmpegService.transcodeOptimal('in.mp4', 'out.mp4', 1080, true)).rejects.toThrow(
+      await expect(ffmpegService.strategyOptimal('in.mp4', 'out.mp4', 1080, true)).rejects.toThrow(
         'ffmpeg signal SIGKILL'
       );
     });
   });
 
-  // ─── transcodeConservative ─────────────────────────────────────────────────
-  describe('transcodeConservative()', () => {
+  // ─── strategyConservative ─────────────────────────────────────────────────
+  // Renamed from transcodeConservative; uses -crf 26 (not 25)
+  describe('strategyConservative()', () => {
     test('includes aac audio when hasAudio is true', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeConservative('in.mp4', 'out.mp4', 480, true);
+      await ffmpegService.strategyConservative('in.mp4', 'out.mp4', 480, true);
       expect(mockExec.mock.calls[0][0]).toContain('-c:a aac');
-      expect(mockExec.mock.calls[0][0]).toContain('-crf 25');
+      expect(mockExec.mock.calls[0][0]).toContain('-crf 26');
     });
 
     test('includes -an when hasAudio is false', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeConservative('in.mp4', 'out.mp4', 360, false);
+      await ffmpegService.strategyConservative('in.mp4', 'out.mp4', 360, false);
       expect(mockExec.mock.calls[0][0]).toContain('-an');
     });
   });
 
-  // ─── transcodeSimple ───────────────────────────────────────────────────────
-  describe('transcodeSimple()', () => {
+  // ─── strategySimple ───────────────────────────────────────────────────────
+  // Renamed from transcodeSimple
+  describe('strategySimple()', () => {
     test('copies audio stream when hasAudio is true', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeSimple('in.mp4', 'out.mp4', 360, true);
+      await ffmpegService.strategySimple('in.mp4', 'out.mp4', 360, true);
       expect(mockExec.mock.calls[0][0]).toContain('-c:a copy');
       expect(mockExec.mock.calls[0][0]).toContain('-preset ultrafast');
     });
 
     test('suppresses audio when hasAudio is false', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeSimple('in.mp4', 'out.mp4', 360, false);
+      await ffmpegService.strategySimple('in.mp4', 'out.mp4', 360, false);
       expect(mockExec.mock.calls[0][0]).toContain('-an');
     });
   });
 
-  // ─── transcodeCopy ─────────────────────────────────────────────────────────
-  describe('transcodeCopy()', () => {
-    test('uses stream-copy mode (-c copy)', async () => {
+  // ─── strategyFastReencode ─────────────────────────────────────────────────
+  // Replaced old transcodeCopy (-c copy is incompatible with -vf scale).
+  // Uses libx264 ultrafast + forced AAC — always produces output even with
+  // incompatible source audio codecs.
+  describe('strategyFastReencode()', () => {
+    test('uses libx264 ultrafast re-encode with forced aac audio', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeCopy('in.mp4', 'out.mp4', 720);
-      expect(mockExec.mock.calls[0][0]).toContain('-c copy');
+      await ffmpegService.strategyFastReencode('in.mp4', 'out.mp4', 720);
+      const cmd = mockExec.mock.calls[0][0];
+      expect(cmd).toContain('-c:v libx264');
+      expect(cmd).toContain('-preset ultrafast');
+      expect(cmd).toContain('-c:a aac');
     });
   });
 
-  // ─── transcodeLastResort ───────────────────────────────────────────────────
-  describe('transcodeLastResort()', () => {
+  // ─── strategyLastResort ───────────────────────────────────────────────────
+  // Renamed from transcodeLastResort; still uses mpeg4/mp3 for maximum compatibility
+  describe('strategyLastResort()', () => {
     test('uses mpeg4/mp3 codecs as final fallback', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeLastResort('in.mp4', 'out.mp4', 360);
+      await ffmpegService.strategyLastResort('in.mp4', 'out.mp4', 360);
       const cmd = mockExec.mock.calls[0][0];
       expect(cmd).toContain('-c:v mpeg4');
       expect(cmd).toContain('-c:a mp3');
@@ -325,17 +337,19 @@ describe('FFmpegService – Internal Methods', () => {
     });
   });
 
-  // ─── processVariantWithFallbacks ───────────────────────────────────────────
-  describe('processVariantWithFallbacks()', () => {
+  // ─── transcodeVariant ──────────────────────────────────────────────────────
+  // Renamed from processVariantWithFallbacks.
+  // Signature: transcodeVariant(target, inputFile, outputFile, hasAudio, outputPath)
+  describe('transcodeVariant()', () => {
     const target = { h: 720, key: 'p720', path: 'videos/720p/vid.mp4' };
     const outputPath = '/tmp/videos/output-tmp123-720p.mp4';
 
     test('uploads via HetznerService on first-strategy success', async () => {
       makeExecSucceed('');
-      await ffmpegService.processVariantWithFallbacks(
+      await ffmpegService.transcodeVariant(
         target,
         'input.mp4',
-        'tmp123',
+        'output-tmp123-720p.mp4',
         true,
         outputPath
       );
@@ -350,10 +364,10 @@ describe('FFmpegService – Internal Methods', () => {
         if (calls === 1) callback(new Error('strategy 1 failed'));
         else callback(null, { stdout: '', stderr: '' });
       });
-      await ffmpegService.processVariantWithFallbacks(
+      await ffmpegService.transcodeVariant(
         target,
         'input.mp4',
-        'tmp123',
+        'output-tmp123-720p.mp4',
         false,
         outputPath
       );
@@ -364,10 +378,10 @@ describe('FFmpegService – Internal Methods', () => {
     test('tries all 5 strategies when output is always too small', async () => {
       makeExecSucceed('');
       mockFs.statSync.mockReturnValue({ size: 500 }); // below 1024 threshold
-      await ffmpegService.processVariantWithFallbacks(
+      await ffmpegService.transcodeVariant(
         target,
         'input.mp4',
-        'tmp123',
+        'output-tmp123-720p.mp4',
         true,
         outputPath
       );
@@ -378,10 +392,10 @@ describe('FFmpegService – Internal Methods', () => {
     test('skips upload when output file does not exist after transcode', async () => {
       makeExecSucceed('');
       mockFs.existsSync.mockReturnValue(false);
-      await ffmpegService.processVariantWithFallbacks(
+      await ffmpegService.transcodeVariant(
         target,
         'input.mp4',
-        'tmp123',
+        'output-tmp123-720p.mp4',
         true,
         outputPath
       );
@@ -390,10 +404,10 @@ describe('FFmpegService – Internal Methods', () => {
 
     test('runs without audio flags when hasAudio is false', async () => {
       makeExecSucceed('');
-      await ffmpegService.processVariantWithFallbacks(
+      await ffmpegService.transcodeVariant(
         { h: 480, key: 'p480', path: 'videos/480p/vid.mp4' },
         'input.mp4',
-        'tmp456',
+        'output-tmp456-480p.mp4',
         false,
         '/tmp/videos/output-tmp456-480p.mp4'
       );
@@ -442,12 +456,9 @@ describe('FFmpegService – Internal Methods', () => {
         fps: 30,
         duration: 5,
       });
-      const pvfSpy = jest
-        .spyOn(ffmpegService, 'processVariantWithFallbacks')
-        .mockResolvedValue(undefined);
-      const cleanupSpy = jest
-        .spyOn(ffmpegService, 'cleanupSingleFile')
-        .mockImplementation(() => {});
+      // transcodeVariant returns true/false — must return true so successCount increments
+      const pvfSpy = jest.spyOn(ffmpegService, 'transcodeVariant').mockResolvedValue(true);
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
 
       const result = await ffmpegService.processVideoVariants(baseOptions);
 
@@ -472,12 +483,8 @@ describe('FFmpegService – Internal Methods', () => {
         fps: 30,
         duration: 5,
       });
-      const pvfSpy = jest
-        .spyOn(ffmpegService, 'processVariantWithFallbacks')
-        .mockResolvedValue(undefined);
-      const cleanupSpy = jest
-        .spyOn(ffmpegService, 'cleanupSingleFile')
-        .mockImplementation(() => {});
+      const pvfSpy = jest.spyOn(ffmpegService, 'transcodeVariant').mockResolvedValue(true);
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
 
       await ffmpegService.processVideoVariants(baseOptions);
       expect(mockFs.mkdirSync).toHaveBeenCalledWith('/tmp/videos', { recursive: true });
@@ -496,12 +503,8 @@ describe('FFmpegService – Internal Methods', () => {
         fps: 60,
         duration: 5,
       });
-      const pvfSpy = jest
-        .spyOn(ffmpegService, 'processVariantWithFallbacks')
-        .mockResolvedValue(undefined);
-      const cleanupSpy = jest
-        .spyOn(ffmpegService, 'cleanupSingleFile')
-        .mockImplementation(() => {});
+      const pvfSpy = jest.spyOn(ffmpegService, 'transcodeVariant').mockResolvedValue(true);
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
 
       const result = await ffmpegService.processVideoVariants(baseOptions);
       expect(result.variants).toBe(4);
@@ -515,9 +518,7 @@ describe('FFmpegService – Internal Methods', () => {
       const probeSpy = jest
         .spyOn(ffmpegService, 'probeVideo')
         .mockRejectedValue(new Error('probe crashed'));
-      const cleanupSpy = jest
-        .spyOn(ffmpegService, 'cleanupSingleFile')
-        .mockImplementation(() => {});
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
 
       await expect(ffmpegService.processVideoVariants(baseOptions)).rejects.toThrow(
         'probe crashed'
@@ -543,9 +544,7 @@ describe('FFmpegService – Internal Methods', () => {
       fakeReadable.pipe = jest.fn(() => fakeReadable);
       readableSpy = jest.spyOn(Readable, 'from').mockReturnValue(fakeReadable);
 
-      const cleanupSpy = jest
-        .spyOn(ffmpegService, 'cleanupSingleFile')
-        .mockImplementation(() => {});
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
       await expect(ffmpegService.processVideoVariants(baseOptions)).rejects.toThrow(
         'ENOSPC: no space left'
       );
