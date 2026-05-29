@@ -1,54 +1,29 @@
-const fetch = require('node-fetch');
 const logger = require('../config/logger');
 const { s3Client } = require('../utils/s3Client');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 
 class HetznerService {
-  async uploadBuffer(buffer, pathLower) {
+  /**
+   * Upload a buffer directly to Hetzner S3 via AWS SDK.
+   * @param {Buffer} buffer - The file content
+   * @param {string} key    - The S3 object key (e.g. "public/uploads/user-ts-720p.mp4")
+   */
+  async uploadBuffer(buffer, key) {
     try {
-      logger.info(`Uploading ${pathLower} to Hetzner...`);
+      logger.info(`Uploading transcoded variant to Hetzner S3: ${key}`);
 
-      const uploadUrlResponse = await fetch(`http://auth-service:3002/URLs/upload-url`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileKey: pathLower,
-          fileType: 'application/octet-stream',
-          expiresIn: 600,
-        }),
-      });
-
-      if (!uploadUrlResponse.ok) {
-        throw new Error(`Failed to get upload URL: ${uploadUrlResponse.statusText}`);
-      }
-
-      // eslint-disable-next-line unused-imports/no-unused-vars
-      const { uploadUrl, publicUrl } = await uploadUrlResponse.json();
-      const bucket = process.env.HETZNER_BUCKET;
-      logger.info(`Received upload URL from auth-service.`, {
-        bucket,
-      });
       const command = new PutObjectCommand({
         Bucket: process.env.HETZNER_BUCKET,
-        Key: pathLower,
+        Key: key,
         Body: buffer,
-        ContentType: 'application/octet-stream',
+        ContentType: 'video/mp4',
       });
 
-      await s3Client
-        .send(command)
-        .then(() => {
-          logger.info(`✅ Uploaded original video to S3 via SDK: ${pathLower}`);
-          return;
-        })
-        .catch((err) => {
-          logger.error('❌ Upload failed via SDK:', err);
-          throw new Error(`Failed to upload ${pathLower} via SDK: ${err.message}`);
-        });
-
-      return pathLower.includes('public') ? publicUrl : pathLower;
+      await s3Client.send(command);
+      logger.info(`✅ Uploaded ${key} to Hetzner S3 (${buffer.length} bytes)`);
+      return key;
     } catch (error) {
-      logger.error(`Hetzner upload error: ${error.message}`);
+      logger.error(`❌ Hetzner S3 upload failed for ${key}: ${error.message}`);
       throw error;
     }
   }

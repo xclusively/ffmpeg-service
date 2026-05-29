@@ -1,7 +1,7 @@
-import { S3Client } from '@aws-sdk/client-s3';
+const { S3Client } = require('@aws-sdk/client-s3');
 
-export const s3Client = new S3Client({
-  region: 'eu-central-1', // Region doesn’t matter for Hetzner but required
+const s3Client = new S3Client({
+  region: 'eu-central-1', // Required by SDK but Hetzner ignores it
   endpoint: process.env.HETZNER_ENDPOINT,
   credentials: {
     accessKeyId: process.env.HETZNER_ACCESS_KEY,
@@ -9,3 +9,5 @@ export const s3Client = new S3Client({
   },
   forcePathStyle: true,
 });
+
+module.exports = { s3Client };

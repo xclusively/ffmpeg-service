@@ -67,8 +67,10 @@ describe('FFmpegService', () => {
     mockJob.getState.mockResolvedValue('completed');
   });
 
-  // ─── getOptimalTargets ──────────────────────────────────────────────────────
-  describe('getOptimalTargets()', () => {
+  // ─── getTargetsBelowSource ──────────────────────────────────────────────────
+  // Renamed from getOptimalTargets. Now takes (sourceHeight, paths) — no width param.
+  // Source file is already uploaded; only STRICTLY LOWER resolutions are created.
+  describe('getTargetsBelowSource()', () => {
     const paths = {
       p1080: '1080p/video.mp4',
       p720: '720p/video.mp4',
@@ -76,45 +78,45 @@ describe('FFmpegService', () => {
       p360: '360p/video.mp4',
     };
 
-    test('should return all 4 variants for 4K source (3840x2160)', () => {
-      const targets = ffmpegService.getOptimalTargets(3840, 2160, paths);
+    test('should return all 4 variants for 4K source (2160p)', () => {
+      const targets = ffmpegService.getTargetsBelowSource(2160, paths);
       expect(targets.length).toBe(4);
       expect(targets.map((t) => t.h)).toEqual([1080, 720, 480, 360]);
     });
 
-    test('should return 3 variants for 1080p source (1920x1080)', () => {
-      // 1080 > 720, 480, 360 but NOT > 1080
-      const targets = ffmpegService.getOptimalTargets(1920, 1080, paths);
+    test('should return 3 variants for 1080p source', () => {
+      // 1080 > 720, 480, 360 but NOT > 1080 (source already uploaded)
+      const targets = ffmpegService.getTargetsBelowSource(1080, paths);
       expect(targets.some((t) => t.h === 1080)).toBe(false);
       expect(targets.some((t) => t.h === 720)).toBe(true);
       expect(targets.some((t) => t.h === 480)).toBe(true);
       expect(targets.some((t) => t.h === 360)).toBe(true);
     });
 
-    test('should return 2 variants for 720p source (1280x720)', () => {
-      // 720 > 480, 360 but NOT > 720
-      const targets = ffmpegService.getOptimalTargets(1280, 720, paths);
+    test('should return 2 variants for 720p source', () => {
+      // 720 > 480, 360 but NOT > 720 (source already uploaded)
+      const targets = ffmpegService.getTargetsBelowSource(720, paths);
       expect(targets.some((t) => t.h === 1080)).toBe(false);
       expect(targets.some((t) => t.h === 720)).toBe(false);
       expect(targets.some((t) => t.h === 480)).toBe(true);
       expect(targets.some((t) => t.h === 360)).toBe(true);
     });
 
-    test('should return 1 variant for 480p source (854x480)', () => {
-      // 480 > 360 but NOT > 480
-      const targets = ffmpegService.getOptimalTargets(854, 480, paths);
+    test('should return 1 variant for 480p source', () => {
+      // 480 > 360 but NOT > 480 (source already uploaded)
+      const targets = ffmpegService.getTargetsBelowSource(480, paths);
       expect(targets.some((t) => t.h === 480)).toBe(false);
       expect(targets.some((t) => t.h === 360)).toBe(true);
       expect(targets.length).toBe(1);
     });
 
-    test('should return no variants for 360p or below source (640x360)', () => {
-      const targets = ffmpegService.getOptimalTargets(640, 360, paths);
+    test('should return no variants for 360p or below source', () => {
+      const targets = ffmpegService.getTargetsBelowSource(360, paths);
       expect(targets.length).toBe(0);
     });
 
     test('each target should have h, key, and path properties', () => {
-      const targets = ffmpegService.getOptimalTargets(1920, 1080, paths);
+      const targets = ffmpegService.getTargetsBelowSource(1080, paths);
       targets.forEach((target) => {
         expect(target).toHaveProperty('h');
         expect(target).toHaveProperty('key');
