@@ -1,39 +1,46 @@
-const express = require('express');
-// const dotenv = require("dotenv");
-const path = require('path');
-require('dotenv').config({
-  path: path.join(__dirname, '.env'),
-});
-const corsMiddleware = require('./src/config/cors');
-const transcodeRouter = require('./src/routes/transcode');
-const logger = require('./src/config/logger');
+require('./infisical-loader')
+  .bootstrap()
+  .then(() => {
+    const express = require('express');
+    const path = require('path');
+    require('dotenv').config({
+      path: path.join(__dirname, '.env'),
+    });
+    const corsMiddleware = require('./src/config/cors');
+    const transcodeRouter = require('./src/routes/transcode');
+    const logger = require('./src/config/logger');
 
-const app = express();
-const PORT = process.env.PORT || 8567;
+    const app = express();
+    const PORT = process.env.PORT || 8567;
 
-// Middleware
-app.use(corsMiddleware);
-app.use(express.json({ limit: '500mb' }));
-app.use(express.urlencoded({ extended: true, limit: '500mb' }));
+    // Middleware
+    app.use(corsMiddleware);
+    app.use(express.json({ limit: '500mb' }));
+    app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
-// Routes
-app.use('/transcode', transcodeRouter);
+    // Routes
+    app.use('/transcode', transcodeRouter);
 
-// Health check
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
-});
+    // Health check
+    app.get('/health', (req, res) => {
+      res.status(200).json({ status: 'ok' });
+    });
 
-// Error handling
-// eslint-disable-next-line unused-imports/no-unused-vars
-app.use((err, req, res, next) => {
-  logger.error(`Unhandled error: ${err.message}`);
-  res.status(500).json({
-    success: false,
-    error: 'Internal server error',
+    // Error handling
+    // eslint-disable-next-line unused-imports/no-unused-vars
+    app.use((err, req, res, next) => {
+      logger.error(`Unhandled error: ${err.message}`);
+      res.status(500).json({
+        success: false,
+        error: 'Internal server error',
+      });
+    });
+
+    app.listen(PORT, () => {
+      logger.info(`FFMPEG Service running on port ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error(err.message);
+    process.exit(1);
   });
-});
-
-app.listen(PORT, () => {
-  logger.info(`FFMPEG Service running on port ${PORT}`);
-});
