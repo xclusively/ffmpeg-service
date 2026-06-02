@@ -13,6 +13,7 @@ COPY package*.json ./
 RUN npm install
 
 # Copy source code
+COPY infisical-loader.js ./
 COPY index.js ./
 COPY src/ ./src/
 
