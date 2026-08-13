@@ -36,7 +36,7 @@
     "dotenv": "^17.2.3",
     "dropbox": "^10.34.0",
     "express": "^5.2.1",
-    "ioredis": "^5.9.1",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
     "node-fetch": "^3.3.2",
     "redis": "^5.10.0",
