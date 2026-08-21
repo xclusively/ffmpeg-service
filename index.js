@@ -11,6 +11,8 @@ require('./infisical-loader')
     const logger = require('./src/config/logger');
 
     const app = express();
+    // ARCH-009: correlation id — mount FIRST so every log line + downstream hop shares one id.
+    app.use(require('./src/middleware/requestId'));
     const PORT = process.env.PORT || 8567;
 
     // Middleware
