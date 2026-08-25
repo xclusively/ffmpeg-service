@@ -1,8 +1,16 @@
 const winston = require('winston');
+const { getRequestId } = require('../utils/requestContext');
+// ARCH-009: stamp every log line with the current request's correlation id.
+const requestIdFormat = winston.format((info) => {
+  const rid = getRequestId();
+  if (rid) info.requestId = rid;
+  return info;
+});
 
 module.exports = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
+    requestIdFormat(),
     winston.format.timestamp({
       format: () => {
         const now = new Date();
