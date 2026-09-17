@@ -1,11 +1,25 @@
+const path = require('path');
+// Must run BEFORE requiring infisical-loader — the loader reads its own
+// INFISICAL_* bootstrap creds from process.env at require time, and in a local
+// bare `node index.js` run those only exist after dotenv loads .env. (In
+// docker/dev/prod they're already real container env vars, so this ordering
+// bug was silent there — only local runs hit it.)
+require('dotenv').config({
+  path: path.join(__dirname, '.env'),
+});
+
 require('./infisical-loader')
   .bootstrap()
   .then(() => {
+    // ARCH-007: fail closed, not open. Without INTERNAL_TOKEN this service can't
+    // tell gateway traffic from a direct network caller — refuse to boot rather
+    // than run with the internal trust boundary silently gone.
+    if (!process.env.INTERNAL_TOKEN) {
+      // eslint-disable-next-line no-console
+      console.error('[ARCH-007] CRITICAL: INTERNAL_TOKEN is not set — refusing to start.');
+      process.exit(1);
+    }
     const express = require('express');
-    const path = require('path');
-    require('dotenv').config({
-      path: path.join(__dirname, '.env'),
-    });
     const corsMiddleware = require('./src/config/cors');
     const transcodeRouter = require('./src/routes/transcode');
     const logger = require('./src/config/logger');
