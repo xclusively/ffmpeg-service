@@ -11,6 +11,23 @@ function verifyToken(req, res, next) {
     return next();
   }
 
+  // ARCH-007 Phase 2: signed, short-lived internal JWT — the preferred credential
+  // going forward, dual-accepted alongside the static token above during rollout.
+  // Dedicated header (not Authorization): the gateway also forwards an end user's
+  // own bearer token there, and this must never collide with that.
+  const internalJwt = req.headers['x-internal-jwt'];
+  if (internalJwt) {
+    try {
+      const decoded = jwt.verify(internalJwt, process.env.INTERNAL_JWT_SECRET);
+      if (decoded.service) {
+        req.user = { internal: true, ...decoded };
+        return next();
+      }
+    } catch {
+      /* invalid/expired — fall through */
+    }
+  }
+
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   if (!token) {
