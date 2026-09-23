@@ -22,6 +22,20 @@ pipeline {
             }
         }
         
+        stage('Secret Scan') {
+            steps {
+                sh '''
+                    echo "🔒 Scanning working tree for verified secrets (TruffleHog)..."
+                    docker run --rm \
+                        -v "$WORKSPACE:/repo:ro" \
+                        trufflesecurity/trufflehog:latest \
+                        filesystem /repo \
+                        --results=verified \
+                        --fail
+                '''
+            }
+        }
+
         stage('Build & Push') {
             steps {
                 sh "docker build -t ${FULL_IMAGE} ."
