@@ -36,6 +36,22 @@ pipeline {
             }
         }
 
+        stage('SonarQube Analysis') {
+            when { branch 'dev' }
+            steps {
+                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                    sh '''
+                        docker run --rm \
+                            --network xclusively-network \
+                            -e SONAR_HOST_URL=http://sonarqube:9000 \
+                            -e SONAR_TOKEN=$SONAR_TOKEN \
+                            -v "$WORKSPACE:/usr/src" \
+                            sonarsource/sonar-scanner-cli:latest
+                    '''
+                }
+            }
+        }
+
         stage('Build & Push') {
             steps {
                 sh "docker build -t ${FULL_IMAGE} ."
