@@ -1,0 +1,105 @@
+name: Trivy Security Report
+
+# DEV ONLY (never main), NON-BLOCKING. Runs on pushes to dev and PRs into dev, so
+# prod and the dev -> main promotion are never touched and never gated. Findings
+# are posted as a sticky PR comment + a run artifact; nothing is committed
+# (generated output stays out of git). Accepted findings go in .trivyignore.
+# Runs on GitHub's runners — zero RAM on our servers.
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  trivy:
+    name: Trivy SCA + IaC (non-blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ github.run_id }}
+          restore-keys: trivy-db-
+
+      - name: Install Trivy
+        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      # Report only — `|| true` so a nonzero Trivy exit never fails the job.
+      # Trivy reads .trivyignore automatically for accepted findings.
+      - name: Scan and build report (never fails)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p security
+          trivy fs . --scanners vuln --severity HIGH,CRITICAL --no-progress --format table -o security/_sca.txt || true
+          trivy config . --severity HIGH,CRITICAL --no-progress --format table -o security/_iac.txt || true
+          trivy fs . --scanners vuln --severity HIGH,CRITICAL --no-progress --format json -o security/trivy-sca.json || true
+          {
+            echo "<!-- trivy-report -->"
+            echo "## 🔎 Trivy security report — ${{ github.event.repository.name }}"
+            echo
+            echo "_Non-blocking · HIGH/CRITICAL only. A filled **Fixed Version** = resolvable by upgrading; empty = no upstream fix yet. Full report is in this run's **Artifacts**._"
+            echo
+            echo "<details><summary><b>SCA — dependencies</b></summary>"
+            echo
+            echo '```'
+            cat security/_sca.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "<details><summary><b>IaC — Dockerfile</b></summary>"
+            echo
+            echo '```'
+            cat security/_iac.txt 2>/dev/null || echo "(no output)"
+            echo '```'
+            echo
+            echo "</details>"
+          } > security/trivy-report.md
+          rm -f security/_sca.txt security/_iac.txt
+
+      - name: Publish to job summary
+        if: always()
+        run: cat security/trivy-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: |
+            security/trivy-report.md
+            security/trivy-sca.json
+
+      # On PRs: post/update ONE sticky comment (found by the hidden marker), so
+      # each push refreshes the same comment instead of adding new ones.
+      - name: Post/update sticky PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- trivy-report -->';
+            let body = fs.readFileSync('security/trivy-report.md', 'utf8');
+            const MAX = 60000;
+            if (body.length > MAX) {
+              body = body.slice(0, MAX) + '\n\n… truncated — see the **trivy-report** artifact for the full report.';
+            }
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

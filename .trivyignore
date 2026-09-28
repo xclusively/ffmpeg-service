@@ -1,0 +1,12 @@
+# .trivyignore — accepted / triaged Trivy findings.
+#
+# Committed on purpose: this is config, not a report. It records HIGH/CRITICAL
+# findings you've reviewed and accepted (e.g. no upstream fix yet, or not
+# exploitable in our usage) so they stop being noise while staying auditable.
+#
+# One ID per line — CVE IDs (SCA) or Trivy check IDs (IaC/Dockerfile).
+# Add a comment above each entry with WHY it's accepted and a review date.
+#
+# Example:
+# # No upstream fix as of 2026-09; not reachable in our code path. Re-check monthly.
+# CVE-2024-12345
