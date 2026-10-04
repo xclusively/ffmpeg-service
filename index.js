@@ -11,14 +11,10 @@ require('dotenv').config({
 require('./infisical-loader')
   .bootstrap()
   .then(() => {
-    // ARCH-007: fail closed, not open. Without INTERNAL_TOKEN this service can't
-    // tell gateway traffic from a direct network caller — refuse to boot rather
-    // than run with the internal trust boundary silently gone.
-    if (!process.env.INTERNAL_TOKEN) {
-      // eslint-disable-next-line no-console
-      console.error('[ARCH-007] CRITICAL: INTERNAL_TOKEN is not set — refusing to start.');
-      process.exit(1);
-    }
+    // ARCH-007: fail closed, not open. Without its internal credential (static token
+    // in dual mode, JWT secret in jwt mode) this service can't tell gateway traffic
+    // from a direct network caller — refuse to boot rather than run open.
+    require('./src/utils/internalAuth').assertInternalAuthConfigured();
     const express = require('express');
     const corsMiddleware = require('./src/config/cors');
     const transcodeRouter = require('./src/routes/transcode');
@@ -27,6 +23,8 @@ require('./infisical-loader')
     const app = express();
     // ARCH-009: correlation id — mount FIRST so every log line + downstream hop shares one id.
     app.use(require('./src/middleware/requestId'));
+    // ARCH-007 D12: x-user-id/x-admin-id are only honoured from verified internal callers.
+    app.use(require('./src/utils/internalAuth').stripUntrustedIdentityHeaders);
     // ARCH-009: one access line per request (method/url/status/durationMs + id).
     app.use(require('./src/middleware/httpLogger'));
     const PORT = process.env.PORT || 8567;

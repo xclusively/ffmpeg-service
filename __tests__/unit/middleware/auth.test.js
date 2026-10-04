@@ -1,7 +1,6 @@
 const jwt = require('jsonwebtoken');
 
-// auth.js reads INTERNAL_TOKEN into a module-level const at require time — must be
-// set BEFORE the require below, not in a beforeEach.
+// Env is read per request by the shared internalAuth module (ARCH-007).
 process.env.INTERNAL_TOKEN = 'shared-secret';
 process.env.INTERNAL_JWT_SECRET = 'internal-jwt-secret';
 process.env.JWT_ACCESS_SECRET = 'user-jwt-secret';
@@ -21,7 +20,35 @@ describe('ffmpeg-service verifyToken middleware', () => {
 
     verifyToken(req, res, next);
 
-    expect(req.user).toEqual({ internal: true });
+    expect(req.user).toEqual({ internal: true, service: 'legacy-static-token' });
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  test('INTERNAL_AUTH_MODE=jwt rejects the static internal token', () => {
+    process.env.INTERNAL_AUTH_MODE = 'jwt';
+    try {
+      const req = { headers: { 'x-internal-token': 'shared-secret' } };
+      const res = mockRes();
+      const next = jest.fn();
+
+      verifyToken(req, res, next);
+
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(401);
+    } finally {
+      delete process.env.INTERNAL_AUTH_MODE;
+    }
+  });
+
+  test('allows a direct service-to-service Bearer internal JWT', () => {
+    const token = jwt.sign({ service: 'post-microservice' }, 'internal-jwt-secret');
+    const req = { headers: { authorization: `Bearer ${token}` } };
+    const res = mockRes();
+    const next = jest.fn();
+
+    verifyToken(req, res, next);
+
+    expect(req.user).toMatchObject({ internal: true, service: 'post-microservice' });
     expect(next).toHaveBeenCalledTimes(1);
   });
 
