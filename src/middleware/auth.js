@@ -1,31 +1,18 @@
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
+const { internalCaller } = require('../utils/internalAuth');
 
 dotenv.config();
 
-const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN;
-
+// ARCH-007: trusted internal caller (shared module) — signed service JWT via
+// x-internal-jwt (gateway) or Authorization: Bearer (direct service-to-service),
+// or the legacy static x-internal-token in INTERNAL_AUTH_MODE=dual only.
 function verifyToken(req, res, next) {
-  if (INTERNAL_TOKEN && req.headers['x-internal-token'] === INTERNAL_TOKEN) {
-    req.user = { internal: true };
+  const caller = internalCaller(req);
+  if (caller) {
+    req.user = { internal: true, ...caller };
+    req.internalCaller = caller;
     return next();
-  }
-
-  // ARCH-007 Phase 2: signed, short-lived internal JWT — the preferred credential
-  // going forward, dual-accepted alongside the static token above during rollout.
-  // Dedicated header (not Authorization): the gateway also forwards an end user's
-  // own bearer token there, and this must never collide with that.
-  const internalJwt = req.headers['x-internal-jwt'];
-  if (internalJwt) {
-    try {
-      const decoded = jwt.verify(internalJwt, process.env.INTERNAL_JWT_SECRET);
-      if (decoded.service) {
-        req.user = { internal: true, ...decoded };
-        return next();
-      }
-    } catch {
-      /* invalid/expired — fall through */
-    }
   }
 
   const authHeader = req.headers.authorization || '';
