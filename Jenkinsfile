@@ -64,17 +64,12 @@ pipeline {
                             docker rename ${CONTAINER_NAME} ${CONTAINER_NAME}-backup
                         fi
                         
-                        # 3. Ensure shared video scratch directory exists on the host
-                        mkdir -p /tmp/xclusively-videos
-
-                        # 4. Start the NEW container
+                        # 3. Start the NEW container (no Docker socket: ffmpeg runs in-image)
                         docker run -d \
                             --name ${CONTAINER_NAME} \
                             --network xclusively-network \
                             --env-file /home/devops/xclusively/${SERVICE_NAME}/.env \
                             --restart unless-stopped \
-                            -v /var/run/docker.sock:/var/run/docker.sock:ro \
-                            -v /tmp/xclusively-videos:/tmp/videos \
                             ${FULL_IMAGE}
                         
                         # ARCH-007 app-tier segmentation — per-call-edge networks, generated from
@@ -95,7 +90,7 @@ pipeline {
                             fi
                         fi
 
-                        # 5. Verification/Health Check
+                        # 4. Verification/Health Check
                         echo "Waiting for health check..."
                         sleep 10
                         if docker ps -f name=^/${CONTAINER_NAME}\$ --format '{{.Status}}' | grep -q "Up"; then

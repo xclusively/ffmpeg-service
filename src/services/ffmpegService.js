@@ -1,17 +1,31 @@
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const util = require('util');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const Queue = require('bull');
 const HetznerService = require('./HetznerService');
 const logger = require('../config/logger');
 const { Readable } = require('stream');
 
-const execAsync = util.promisify(exec);
+const execFileAsync = util.promisify(execFile);
 
-// Shared directory — bind-mounted on both ffmpeg-service and ffmpeg-worker containers
-// Host path: /tmp/xclusively-videos (see docker-compose.yml)
-const SHARED_VIDEO_PATH = '/tmp/videos';
+// ffmpeg/ffprobe run inside this image (Dockerfile installs ffmpeg). Previously every call
+// was `docker exec ffmpeg-worker …`, which required mounting the host Docker socket into
+// this container — i.e. a compromised ffmpeg-service could control Docker on the host.
+// Arguments are always passed as an array (execFile, no shell).
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
+// Each job gets its own private (0700, mkdtemp) directory under this root, removed after.
+const WORK_ROOT = process.env.VIDEO_WORK_DIR || os.tmpdir();
+const MAX_BUFFER = 16 * 1024 * 1024;
+
+const runFfmpeg = (args, timeout) =>
+  execFileAsync(FFMPEG, ['-hide_banner', '-loglevel', 'error', ...args], {
+    timeout,
+    maxBuffer: MAX_BUFFER,
+  });
 
 // ---------------------------------------------------------------------------
 // Bull queue — backed by Redis
@@ -72,20 +86,16 @@ class FFmpegService {
   // Main processing — called inside the Bull worker
   // ---------------------------------------------------------------------------
   async processVideoVariants(options) {
-    const { fileKey, mediaContent, timestamp = Date.now() } = options;
-    let inputPath = null;
+    const { fileKey, mediaContent } = options;
+    let workDir = null;
 
     try {
       logger.info(`Starting transcoding for ${fileKey}`);
 
-      // ── 1. Write incoming base64 content to a temp file ──────────────────
-      const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
-      const inputFile = `input-${tempId}.mp4`;
-      inputPath = path.join(SHARED_VIDEO_PATH, inputFile);
-
-      if (!fs.existsSync(SHARED_VIDEO_PATH)) {
-        fs.mkdirSync(SHARED_VIDEO_PATH, { recursive: true });
-      }
+      // ── 1. Write incoming base64 content into a private per-job directory ──
+      workDir = fs.mkdtempSync(path.join(WORK_ROOT, 'xcl-transcode-'));
+      const tempId = crypto.randomUUID();
+      const inputPath = path.join(workDir, `input-${tempId}.mp4`);
 
       const buffer = Buffer.from(mediaContent, 'base64');
       await new Promise((resolve, reject) => {
@@ -100,7 +110,7 @@ class FFmpegService {
       logger.info(`Wrote ${buffer.length} bytes to ${inputPath}`);
 
       // ── 2. Probe the input to get real dimensions ─────────────────────────
-      const probe = await this.probeVideo(inputFile);
+      const probe = await this.probeVideo(inputPath);
       logger.info(
         `Probe result: ${probe.width}x${probe.height}, audio=${probe.hasAudio}, codec=${probe.codec}`
       );
@@ -127,17 +137,10 @@ class FFmpegService {
       // ── 4. Transcode each variant (sequentially to avoid OOM) ───────────
       let successCount = 0;
       for (const target of targets) {
-        const outputFile = `output-${tempId}-${target.h}p.mp4`;
-        const outputPath = path.join(SHARED_VIDEO_PATH, outputFile);
+        const outputPath = path.join(workDir, `output-${tempId}-${target.h}p.mp4`);
 
         try {
-          const ok = await this.transcodeVariant(
-            target,
-            inputFile,
-            outputFile,
-            probe.hasAudio,
-            outputPath
-          );
+          const ok = await this.transcodeVariant(target, inputPath, outputPath, probe.hasAudio);
           if (ok) successCount++;
         } finally {
           this.cleanupFile(outputPath);
@@ -152,7 +155,7 @@ class FFmpegService {
       logger.error(`Transcoding pipeline failed for ${fileKey}: ${error.message}`);
       throw error;
     } finally {
-      if (inputPath) this.cleanupFile(inputPath);
+      if (workDir) this.cleanupDir(workDir);
     }
   }
 
@@ -183,22 +186,22 @@ class FFmpegService {
   // ---------------------------------------------------------------------------
   // Transcoding a single variant — tries strategies in order, uploads on success
   // ---------------------------------------------------------------------------
-  async transcodeVariant(target, inputFile, outputFile, hasAudio, outputPath) {
-    logger.info(`Transcoding → ${target.h}p (output: ${outputFile})`);
+  async transcodeVariant(target, inputPath, outputPath, hasAudio) {
+    logger.info(`Transcoding → ${target.h}p (output: ${path.basename(outputPath)})`);
 
     // Strategies from best quality to last resort.
     // All use scale=-2:height so aspect ratio is always preserved (portrait or landscape).
     const strategies = [
       // 1. Optimal — H.264 veryfast, proper audio normalisation
-      () => this.strategyOptimal(inputFile, outputFile, target.h, hasAudio),
+      () => this.strategyOptimal(inputPath, outputPath, target.h, hasAudio),
       // 2. Conservative — medium preset, slightly more compatible
-      () => this.strategyConservative(inputFile, outputFile, target.h, hasAudio),
+      () => this.strategyConservative(inputPath, outputPath, target.h, hasAudio),
       // 3. Simple — ultrafast, stream-copy audio
-      () => this.strategySimple(inputFile, outputFile, target.h, hasAudio),
+      () => this.strategySimple(inputPath, outputPath, target.h, hasAudio),
       // 4. Fast re-encode — ultrafast + aac, very low quality but always produces output
-      () => this.strategyFastReencode(inputFile, outputFile, target.h),
+      () => this.strategyFastReencode(inputPath, outputPath, target.h),
       // 5. Last resort — mpeg4 container, preserves aspect ratio, maximum compatibility
-      () => this.strategyLastResort(inputFile, outputFile, target.h),
+      () => this.strategyLastResort(inputPath, outputPath, target.h),
     ];
 
     for (let i = 0; i < strategies.length; i++) {
@@ -237,82 +240,147 @@ class FFmpegService {
   // This works correctly for both landscape AND portrait videos.
   // ---------------------------------------------------------------------------
 
-  async strategyOptimal(inputFile, outputFile, height, hasAudio) {
-    let cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -profile:v main -level 4.0 ` +
-      `-movflags +faststart -g 48 -keyint_min 48 `;
-
-    cmd += hasAudio ? `-c:a aac -b:a 128k -ar 44100 -ac 2 ` : `-an `;
-    cmd += `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 600000 });
+  async strategyOptimal(inputPath, outputPath, height, hasAudio) {
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-profile:v',
+        'main',
+        '-level',
+        '4.0',
+        '-movflags',
+        '+faststart',
+        '-g',
+        '48',
+        '-keyint_min',
+        '48',
+        ...(hasAudio ? ['-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2'] : ['-an']),
+        '-y',
+        outputPath,
+      ],
+      600000
+    );
   }
 
-  async strategyConservative(inputFile, outputFile, height, hasAudio) {
-    let cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v libx264 -preset medium -crf 26 -pix_fmt yuv420p ` +
-      `-movflags +faststart `;
-
-    cmd += hasAudio ? `-c:a aac -b:a 96k ` : `-an `;
-    cmd += `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 600000 });
+  async strategyConservative(inputPath, outputPath, height, hasAudio) {
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'medium',
+        '-crf',
+        '26',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        '+faststart',
+        ...(hasAudio ? ['-c:a', 'aac', '-b:a', '96k'] : ['-an']),
+        '-y',
+        outputPath,
+      ],
+      600000
+    );
   }
 
-  async strategySimple(inputFile, outputFile, height, hasAudio) {
-    let cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v libx264 -preset ultrafast -crf 30 `;
-
-    cmd += hasAudio ? `-c:a copy ` : `-an `;
-    cmd += `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 300000 });
+  async strategySimple(inputPath, outputPath, height, hasAudio) {
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '30',
+        ...(hasAudio ? ['-c:a', 'copy'] : ['-an']),
+        '-y',
+        outputPath,
+      ],
+      300000
+    );
   }
 
-  async strategyFastReencode(inputFile, outputFile, height) {
+  async strategyFastReencode(inputPath, outputPath, height) {
     // Does NOT stream-copy — uses ultrafast + force audio encode.
     // Works even when the source audio codec is incompatible.
-    const cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v libx264 -preset ultrafast -crf 35 ` +
-      `-c:a aac -b:a 64k ` +
-      `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 300000 });
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '35',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '64k',
+        '-y',
+        outputPath,
+      ],
+      300000
+    );
   }
 
-  async strategyLastResort(inputFile, outputFile, height) {
+  async strategyLastResort(inputPath, outputPath, height) {
     // mpeg4 container — maximum compatibility.
     // Uses -2 to preserve aspect ratio (portrait AND landscape safe).
-    const cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v mpeg4 -b:v 1000k ` +
-      `-c:a mp3 -b:a 128k ` +
-      `-f mp4 ` +
-      `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 300000 });
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'mpeg4',
+        '-b:v',
+        '1000k',
+        '-c:a',
+        'mp3',
+        '-b:a',
+        '128k',
+        '-f',
+        'mp4',
+        '-y',
+        outputPath,
+      ],
+      300000
+    );
   }
 
   // ---------------------------------------------------------------------------
-  // ffprobe — get actual video dimensions from the shared volume
+  // ffprobe — get actual video dimensions
   // ---------------------------------------------------------------------------
-  async probeVideo(inputFile) {
+  async probeVideo(inputPath) {
     try {
-      const cmd =
-        `docker exec ffmpeg-worker ffprobe ` +
-        `-v quiet -print_format json -show_format -show_streams ` +
-        `/tmp/videos/${inputFile}`;
-
-      const { stdout } = await execAsync(cmd, { timeout: 30000 });
+      const { stdout } = await execFileAsync(
+        FFPROBE,
+        ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', inputPath],
+        { timeout: 30000, maxBuffer: MAX_BUFFER }
+      );
       const probe = JSON.parse(stdout);
 
       const videoStream = probe.streams.find((s) => s.codec_type === 'video');
@@ -379,6 +447,16 @@ class FFmpegService {
       }
     } catch (e) {
       logger.warn(`Failed to clean up ${filePath}: ${e.message}`);
+    }
+  }
+
+  // Remove a per-job working directory and everything in it.
+  cleanupDir(dirPath) {
+    try {
+      fs.rmSync(dirPath, { recursive: true, force: true });
+      logger.debug(`Cleaned up ${dirPath}`);
+    } catch (e) {
+      logger.warn(`Failed to clean up ${dirPath}: ${e.message}`);
     }
   }
 }
