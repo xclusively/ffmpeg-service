@@ -3,9 +3,9 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-# Install Docker CLI (minimal)
+# ffmpeg/ffprobe run inside this image (no Docker CLI, no host Docker socket).
 RUN apt-get update && \
-    apt-get install -y docker.io && \
+    apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy package files

@@ -6,12 +6,6 @@ services:
       - /home/devops/xclusively/ffmpeg-service/.env
     ports:
       - '8567:8567'
-    volumes:
-      # Docker socket — required to run `docker exec ffmpeg-worker ffmpeg ...`
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Shared video scratch dir — same host path used by ffmpeg-worker
-      # so input files written here are visible inside ffmpeg-worker's /tmp/videos
-      - /tmp/xclusively-videos:/tmp/videos
     networks:
       - xclusively-network
     restart: unless-stopped
