@@ -13,6 +13,25 @@ const execAsync = util.promisify(exec);
 // Host path: /tmp/xclusively-videos (see docker-compose.yml)
 const SHARED_VIDEO_PATH = '/tmp/videos';
 
+// Whisper transcription (used by /transcribe for video moderation). Best-effort
+// and OFF by default — enable only once whisper-worker also mounts the shared
+// /tmp/videos volume (so it can read the extracted audio). When disabled, the
+// /transcribe endpoint returns a graceful skip and moderation proceeds on frames
+// + text fields alone.
+const WHISPER_ENABLED = process.env.WHISPER_ENABLED === 'true';
+const WHISPER_MODEL = process.env.WHISPER_MODEL || 'base';
+const WHISPER_COMMAND = process.env.WHISPER_COMMAND || 'whisper';
+const WHISPER_ARGS_TEMPLATE =
+  process.env.WHISPER_ARGS_TEMPLATE ||
+  '{input} --model {model} --output_format txt --output_dir {outdir}';
+// Base sampling fps for moderation frame extraction (adaptive per clip length).
+const MODERATION_BASE_FPS = Number.parseFloat(process.env.MODERATION_FPS || '0.5');
+
+const renderWhisperArgs = (template, replacements) =>
+  template.replace(/\{(\w+)\}/g, (match, key) =>
+    Object.prototype.hasOwnProperty.call(replacements, key) ? replacements[key] : match
+  );
+
 // ---------------------------------------------------------------------------
 // Bull queue — backed by Redis
 // ---------------------------------------------------------------------------
@@ -369,6 +388,168 @@ class FFmpegService {
   }
 
   // ---------------------------------------------------------------------------
+  // Adaptive fps — scale sampling DOWN for longer videos so the total extracted
+  // frame count stays ~maxFrames regardless of clip length. A 30s clip samples
+  // at the base fps; a 10-minute clip samples proportionally slower, spreading
+  // ~maxFrames across the whole duration. Keeps ffmpeg output + the downstream
+  // Rekognition call count bounded for large files.
+  // ---------------------------------------------------------------------------
+  computeAdaptiveFps(durationSeconds, maxFrames, baseFps) {
+    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return baseFps;
+    const frames = Number.isFinite(maxFrames) && maxFrames > 0 ? maxFrames : 20;
+    const spreadFps = frames / durationSeconds;
+    const fps = Math.min(baseFps, spreadFps);
+    return fps > 0 ? fps : baseFps; // ffmpeg needs a positive fps
+  }
+
+  // ---------------------------------------------------------------------------
+  // Frame extraction for MODERATION — returns sampled frames as base64 JPGs so
+  // the CALLER (verify-service) runs AWS Rekognition on them in-memory. This is
+  // what lets verify-service stay free of ffmpeg / the Docker socket / temp files.
+  //
+  // Throws on hard failure (no frames producible) so the caller treats it as a
+  // moderation error and fail-safes (queues for human review) rather than
+  // silently passing an un-inspected video.
+  // ---------------------------------------------------------------------------
+  async extractFrames({
+    mediaContent,
+    maxFrames = 20,
+    fps,
+    startSeconds,
+    durationSeconds,
+    timestamp = Date.now(),
+  }) {
+    const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
+    const inputFile = `frames-in-${tempId}.mp4`;
+    const framesDirName = `frames-${tempId}`;
+    const inputPath = path.join(SHARED_VIDEO_PATH, inputFile);
+    const framesDir = path.join(SHARED_VIDEO_PATH, framesDirName);
+
+    try {
+      if (!fs.existsSync(SHARED_VIDEO_PATH)) {
+        fs.mkdirSync(SHARED_VIDEO_PATH, { recursive: true });
+      }
+      fs.mkdirSync(framesDir, { recursive: true });
+
+      const buffer = Buffer.from(mediaContent, 'base64');
+      await new Promise((resolve, reject) => {
+        const readable = Readable.from(buffer);
+        const writeStream = fs.createWriteStream(inputPath);
+        readable.pipe(writeStream);
+        readable.on('error', reject);
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+      });
+
+      const probe = await this.probeVideo(inputFile);
+      const clipDuration = probe.duration || 0;
+      const windowSeconds = Number.isFinite(durationSeconds) ? durationSeconds : clipDuration;
+      const useFps =
+        Number.isFinite(fps) && fps > 0
+          ? fps
+          : this.computeAdaptiveFps(windowSeconds, maxFrames, MODERATION_BASE_FPS);
+      const frameCap = Number.isFinite(maxFrames) && maxFrames > 0 ? maxFrames : 20;
+
+      const args = [];
+      if (Number.isFinite(startSeconds) && startSeconds > 0) args.push(`-ss ${startSeconds}`);
+      args.push(`-i /tmp/videos/${inputFile}`);
+      if (Number.isFinite(durationSeconds) && durationSeconds > 0)
+        args.push(`-t ${durationSeconds}`);
+      args.push(
+        `-vf fps=${useFps} -frames:v ${frameCap} "/tmp/videos/${framesDirName}/frame_%03d.jpg"`
+      );
+
+      const cmd = `docker exec ffmpeg-worker ffmpeg -hide_banner -loglevel error ${args.join(' ')}`;
+      await execAsync(cmd, { timeout: 120000 });
+
+      const frames = fs
+        .readdirSync(framesDir)
+        .filter((file) => file.toLowerCase().endsWith('.jpg'))
+        .sort()
+        .slice(0, frameCap)
+        .map((file) => fs.readFileSync(path.join(framesDir, file)).toString('base64'));
+
+      logger.info(
+        `Extracted ${frames.length} moderation frame(s) (dur=${clipDuration}s, fps=${useFps})`
+      );
+      return {
+        frames,
+        width: probe.width || null,
+        height: probe.height || null,
+        durationSeconds: clipDuration,
+      };
+    } finally {
+      this.cleanupFile(inputPath);
+      this.cleanupDir(framesDir);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Transcription for MODERATION — extracts audio via ffmpeg-worker, runs whisper
+  // via whisper-worker, returns the transcript text. Best-effort: never throws —
+  // returns { skipped, reason } so moderation proceeds on frames + text alone.
+  // Requires whisper-worker to also mount the shared /tmp/videos volume; guarded
+  // behind WHISPER_ENABLED so it stays a graceful no-op until that infra is in place.
+  // ---------------------------------------------------------------------------
+  async transcribeAudio({ mediaContent, timestamp = Date.now() }) {
+    if (!WHISPER_ENABLED) {
+      return { transcript: '', skipped: true, reason: 'whisper_disabled' };
+    }
+
+    const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
+    const inputFile = `tr-in-${tempId}.mp4`;
+    const audioName = `tr-${tempId}`;
+    const audioFile = `${audioName}.wav`;
+    const inputPath = path.join(SHARED_VIDEO_PATH, inputFile);
+    const audioPath = path.join(SHARED_VIDEO_PATH, audioFile);
+    const transcriptPath = path.join(SHARED_VIDEO_PATH, `${audioName}.txt`);
+
+    try {
+      if (!fs.existsSync(SHARED_VIDEO_PATH)) {
+        fs.mkdirSync(SHARED_VIDEO_PATH, { recursive: true });
+      }
+
+      const buffer = Buffer.from(mediaContent, 'base64');
+      await new Promise((resolve, reject) => {
+        const readable = Readable.from(buffer);
+        const writeStream = fs.createWriteStream(inputPath);
+        readable.pipe(writeStream);
+        readable.on('error', reject);
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+      });
+
+      await execAsync(
+        `docker exec ffmpeg-worker ffmpeg -hide_banner -loglevel error ` +
+          `-i /tmp/videos/${inputFile} -vn -ac 1 -ar 16000 -f wav -y /tmp/videos/${audioFile}`,
+        { timeout: 180000 }
+      );
+
+      const whisperArgs = renderWhisperArgs(WHISPER_ARGS_TEMPLATE, {
+        input: `/tmp/videos/${audioFile}`,
+        model: WHISPER_MODEL,
+        outdir: '/tmp/videos',
+        output: `/tmp/videos/${audioName}`,
+      });
+      await execAsync(`docker exec whisper-worker ${WHISPER_COMMAND} ${whisperArgs}`, {
+        timeout: 600000,
+      });
+
+      const transcript = fs.existsSync(transcriptPath)
+        ? fs.readFileSync(transcriptPath, 'utf8')
+        : '';
+      return { transcript, skipped: false };
+    } catch (error) {
+      logger.warn(`Whisper transcription failed: ${error.message}`);
+      return { transcript: '', skipped: true, reason: 'whisper_failed' };
+    } finally {
+      this.cleanupFile(inputPath);
+      this.cleanupFile(audioPath);
+      this.cleanupFile(transcriptPath);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Poster frame — SYNCHRONOUS single-frame extraction for a <video poster>.
   //
   // One still per video, scaled to <= `width` px wide at the video's native aspect
@@ -461,6 +642,17 @@ class FFmpegService {
       }
     } catch (e) {
       logger.warn(`Failed to clean up ${filePath}: ${e.message}`);
+    }
+  }
+
+  cleanupDir(dirPath) {
+    try {
+      if (fs.existsSync(dirPath)) {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+        logger.debug(`Cleaned up dir ${dirPath}`);
+      }
+    } catch (e) {
+      logger.warn(`Failed to clean up dir ${dirPath}: ${e.message}`);
     }
   }
 }

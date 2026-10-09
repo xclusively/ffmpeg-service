@@ -9,6 +9,8 @@ require('./infisical-loader')
     const corsMiddleware = require('./src/config/cors');
     const transcodeRouter = require('./src/routes/transcode');
     const posterRouter = require('./src/routes/poster');
+    const framesRouter = require('./src/routes/moderationMedia');
+    const transcribeRouter = require('./src/routes/transcribe');
     const logger = require('./src/config/logger');
 
     const app = express();
@@ -22,6 +24,8 @@ require('./infisical-loader')
     // Routes
     app.use('/transcode', transcodeRouter);
     app.use('/poster', posterRouter);
+    app.use('/frames', framesRouter);
+    app.use('/transcribe', transcribeRouter);
 
     // Health check
     app.get('/health', (req, res) => {
