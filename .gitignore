@@ -56,3 +56,6 @@ build/
 
 # Infisical disk cache (runtime, per-machine)
 .infisical-cache/
+# Trivy generated reports (surfaced via PR comment + run artifact, never committed)
+security/trivy-report.md
+security/trivy-sca.json

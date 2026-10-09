@@ -14,3 +14,6 @@ pnpm-lock.yaml
 # Auto-generated
 *.min.js
 *.min.css
+# Trivy generated reports
+security/trivy-report.md
+security/trivy-sca.json

@@ -13,6 +13,8 @@ pipeline {
         DEPLOY_ENV   = "${env.BRANCH_NAME == 'main' ? 'prod' : 'dev'}"
         FULL_IMAGE   = "${REGISTRY}/${ORG_NAME}/${DEPLOY_ENV}/${SERVICE_NAME}:${IMAGE_TAG}"
         CONTAINER_NAME = "${DEPLOY_ENV}-${SERVICE_NAME}"
+        // ARCH-007 Phase B toggle (dev): leave xclusively-network after edge networks are in place.
+        ARCH007_ISOLATE = 'false'
     }
     
     stages {
@@ -62,20 +64,33 @@ pipeline {
                             docker rename ${CONTAINER_NAME} ${CONTAINER_NAME}-backup
                         fi
                         
-                        # 3. Ensure shared video scratch directory exists on the host
-                        mkdir -p /tmp/xclusively-videos
-
-                        # 4. Start the NEW container
+                        # 3. Start the NEW container (no Docker socket: ffmpeg runs in-image)
                         docker run -d \
                             --name ${CONTAINER_NAME} \
                             --network xclusively-network \
                             --env-file /home/devops/xclusively/${SERVICE_NAME}/.env \
                             --restart unless-stopped \
-                            -v /var/run/docker.sock:/var/run/docker.sock:ro \
-                            -v /tmp/xclusively-videos:/tmp/videos \
                             ${FULL_IMAGE}
                         
-                        # 5. Verification/Health Check
+                        # ARCH-007 app-tier segmentation — per-call-edge networks, generated from
+                        # infrastructure/arch007/networks.json (gen_networks.py). Phase A (dev only): ALSO join
+                        # this service's edge networks — additive, no behaviour change. Phase B: set
+                        # ARCH007_ISOLATE=true (via PR) to leave the shared xclusively-network, once every peer
+                        # and infra container (nginx, blackbox, postgres, redis) is on its networks.
+                        if [ "${DEPLOY_ENV}" = "dev" ]; then
+                            for spec in \
+                                xce-api-gateway--ffmpeg-service:10.77.0.96/28 \
+                                xce-ffmpeg-service--post-service:10.77.1.96/28; do
+                                net="${DEPLOY_ENV}-\${spec%%:*}"; subnet="\${spec#*:}"
+                                docker network inspect "\$net" >/dev/null 2>&1 || docker network create --subnet "\$subnet" "\$net" >/dev/null 2>&1 || docker network inspect "\$net" >/dev/null
+                                docker network connect "\$net" ${CONTAINER_NAME} 2>/dev/null || true
+                            done
+                            if [ "${ARCH007_ISOLATE}" = "true" ]; then
+                                docker network disconnect xclusively-network ${CONTAINER_NAME} || true
+                            fi
+                        fi
+
+                        # 4. Verification/Health Check
                         echo "Waiting for health check..."
                         sleep 10
                         if docker ps -f name=^/${CONTAINER_NAME}\$ --format '{{.Status}}' | grep -q "Up"; then

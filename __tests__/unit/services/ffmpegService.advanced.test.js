@@ -22,7 +22,7 @@ jest.mock('../../../src/config/logger', () => ({
   debug: jest.fn(),
 }));
 
-jest.mock('child_process', () => ({ exec: jest.fn() }));
+jest.mock('child_process', () => ({ exec: jest.fn(), execFile: jest.fn() }));
 
 jest.mock('fs', () => ({
   ...jest.requireActual('fs'),
@@ -32,6 +32,8 @@ jest.mock('fs', () => ({
   readFileSync: jest.fn().mockReturnValue(Buffer.alloc(6000)),
   statSync: jest.fn().mockReturnValue({ size: 6000 }),
   unlinkSync: jest.fn(),
+  mkdtempSync: jest.fn().mockReturnValue('/tmp/xcl-transcode-test'),
+  rmSync: jest.fn(),
 }));
 
 jest.mock('../../../src/services/HetznerService', () => ({
@@ -62,7 +64,9 @@ const mockQueue = {
 jest.mock('bull', () => jest.fn(() => mockQueue));
 
 // ─── Mock references ──────────────────────────────────────────────────────────
-const { exec: mockExec } = require('child_process');
+// ffmpeg/ffprobe now run in-image via execFile(file, argsArray, opts, cb) — no shell, no docker exec.
+const { execFile: mockExec } = require('child_process');
+const cmdOf = (i = 0) => [mockExec.mock.calls[i][0], ...mockExec.mock.calls[i][1]].join(' ');
 const mockFs = require('fs');
 const HetznerService = require('../../../src/services/HetznerService');
 
@@ -70,7 +74,7 @@ const HetznerService = require('../../../src/services/HetznerService');
 /** Configure exec mock to succeed with optional stdout value.
  * Resolves with { stdout, stderr } so util.promisify destructuring works. */
 const makeExecSucceed = (stdout = '') => {
-  mockExec.mockImplementation((cmd, opts, cb) => {
+  mockExec.mockImplementation((file, args, opts, cb) => {
     const callback = typeof opts === 'function' ? opts : cb;
     callback(null, { stdout, stderr: '' });
   });
@@ -78,7 +82,7 @@ const makeExecSucceed = (stdout = '') => {
 
 /** Configure exec mock to fail with the given message */
 const makeExecFail = (msg = 'exec failed') => {
-  mockExec.mockImplementation((cmd, opts, cb) => {
+  mockExec.mockImplementation((file, args, opts, cb) => {
     const callback = typeof opts === 'function' ? opts : cb;
     callback(new Error(msg));
   });
@@ -255,7 +259,7 @@ describe('FFmpegService – Internal Methods', () => {
     test('builds aac audio command when hasAudio is true', async () => {
       makeExecSucceed('');
       await ffmpegService.strategyOptimal('in.mp4', 'out.mp4', 720, true);
-      const cmd = mockExec.mock.calls[0][0];
+      const cmd = cmdOf(0);
       expect(cmd).toContain('-c:a aac');
       expect(cmd).toContain('scale=-2:720');
       expect(cmd).toContain('-c:v libx264');
@@ -264,7 +268,7 @@ describe('FFmpegService – Internal Methods', () => {
     test('builds no-audio command when hasAudio is false', async () => {
       makeExecSucceed('');
       await ffmpegService.strategyOptimal('in.mp4', 'out.mp4', 480, false);
-      expect(mockExec.mock.calls[0][0]).toContain('-an');
+      expect(cmdOf(0)).toContain('-an');
     });
 
     test('rejects when exec fails', async () => {
@@ -281,14 +285,14 @@ describe('FFmpegService – Internal Methods', () => {
     test('includes aac audio when hasAudio is true', async () => {
       makeExecSucceed('');
       await ffmpegService.strategyConservative('in.mp4', 'out.mp4', 480, true);
-      expect(mockExec.mock.calls[0][0]).toContain('-c:a aac');
-      expect(mockExec.mock.calls[0][0]).toContain('-crf 26');
+      expect(cmdOf(0)).toContain('-c:a aac');
+      expect(cmdOf(0)).toContain('-crf 26');
     });
 
     test('includes -an when hasAudio is false', async () => {
       makeExecSucceed('');
       await ffmpegService.strategyConservative('in.mp4', 'out.mp4', 360, false);
-      expect(mockExec.mock.calls[0][0]).toContain('-an');
+      expect(cmdOf(0)).toContain('-an');
     });
   });
 
@@ -298,14 +302,14 @@ describe('FFmpegService – Internal Methods', () => {
     test('copies audio stream when hasAudio is true', async () => {
       makeExecSucceed('');
       await ffmpegService.strategySimple('in.mp4', 'out.mp4', 360, true);
-      expect(mockExec.mock.calls[0][0]).toContain('-c:a copy');
-      expect(mockExec.mock.calls[0][0]).toContain('-preset ultrafast');
+      expect(cmdOf(0)).toContain('-c:a copy');
+      expect(cmdOf(0)).toContain('-preset ultrafast');
     });
 
     test('suppresses audio when hasAudio is false', async () => {
       makeExecSucceed('');
       await ffmpegService.strategySimple('in.mp4', 'out.mp4', 360, false);
-      expect(mockExec.mock.calls[0][0]).toContain('-an');
+      expect(cmdOf(0)).toContain('-an');
     });
   });
 
@@ -317,7 +321,7 @@ describe('FFmpegService – Internal Methods', () => {
     test('uses libx264 ultrafast re-encode with forced aac audio', async () => {
       makeExecSucceed('');
       await ffmpegService.strategyFastReencode('in.mp4', 'out.mp4', 720);
-      const cmd = mockExec.mock.calls[0][0];
+      const cmd = cmdOf(0);
       expect(cmd).toContain('-c:v libx264');
       expect(cmd).toContain('-preset ultrafast');
       expect(cmd).toContain('-c:a aac');
@@ -330,7 +334,7 @@ describe('FFmpegService – Internal Methods', () => {
     test('uses mpeg4/mp3 codecs as final fallback', async () => {
       makeExecSucceed('');
       await ffmpegService.strategyLastResort('in.mp4', 'out.mp4', 360);
-      const cmd = mockExec.mock.calls[0][0];
+      const cmd = cmdOf(0);
       expect(cmd).toContain('-c:v mpeg4');
       expect(cmd).toContain('-c:a mp3');
       expect(cmd).toContain('-f mp4');
@@ -339,38 +343,26 @@ describe('FFmpegService – Internal Methods', () => {
 
   // ─── transcodeVariant ──────────────────────────────────────────────────────
   // Renamed from processVariantWithFallbacks.
-  // Signature: transcodeVariant(target, inputFile, outputFile, hasAudio, outputPath)
+  // Signature: transcodeVariant(target, inputPath, outputPath, hasAudio)
   describe('transcodeVariant()', () => {
     const target = { h: 720, key: 'p720', path: 'videos/720p/vid.mp4' };
     const outputPath = '/tmp/videos/output-tmp123-720p.mp4';
 
     test('uploads via HetznerService on first-strategy success', async () => {
       makeExecSucceed('');
-      await ffmpegService.transcodeVariant(
-        target,
-        'input.mp4',
-        'output-tmp123-720p.mp4',
-        true,
-        outputPath
-      );
+      await ffmpegService.transcodeVariant(target, 'input.mp4', outputPath, true);
       expect(HetznerService.uploadBuffer).toHaveBeenCalledWith(expect.any(Buffer), target.path);
     });
 
     test('falls back to strategy 2 when strategy 1 exec fails', async () => {
       let calls = 0;
-      mockExec.mockImplementation((cmd, opts, cb) => {
+      mockExec.mockImplementation((file, args, opts, cb) => {
         const callback = typeof opts === 'function' ? opts : cb;
         calls++;
         if (calls === 1) callback(new Error('strategy 1 failed'));
         else callback(null, { stdout: '', stderr: '' });
       });
-      await ffmpegService.transcodeVariant(
-        target,
-        'input.mp4',
-        'output-tmp123-720p.mp4',
-        false,
-        outputPath
-      );
+      await ffmpegService.transcodeVariant(target, 'input.mp4', outputPath, false);
       expect(mockExec).toHaveBeenCalledTimes(2);
       expect(HetznerService.uploadBuffer).toHaveBeenCalled();
     });
@@ -378,13 +370,7 @@ describe('FFmpegService – Internal Methods', () => {
     test('tries all 5 strategies when output is always too small', async () => {
       makeExecSucceed('');
       mockFs.statSync.mockReturnValue({ size: 500 }); // below 1024 threshold
-      await ffmpegService.transcodeVariant(
-        target,
-        'input.mp4',
-        'output-tmp123-720p.mp4',
-        true,
-        outputPath
-      );
+      await ffmpegService.transcodeVariant(target, 'input.mp4', outputPath, true);
       expect(mockExec).toHaveBeenCalledTimes(5);
       expect(HetznerService.uploadBuffer).not.toHaveBeenCalled();
     });
@@ -392,13 +378,7 @@ describe('FFmpegService – Internal Methods', () => {
     test('skips upload when output file does not exist after transcode', async () => {
       makeExecSucceed('');
       mockFs.existsSync.mockReturnValue(false);
-      await ffmpegService.transcodeVariant(
-        target,
-        'input.mp4',
-        'output-tmp123-720p.mp4',
-        true,
-        outputPath
-      );
+      await ffmpegService.transcodeVariant(target, 'input.mp4', outputPath, true);
       expect(HetznerService.uploadBuffer).not.toHaveBeenCalled();
     });
 
@@ -407,9 +387,8 @@ describe('FFmpegService – Internal Methods', () => {
       await ffmpegService.transcodeVariant(
         { h: 480, key: 'p480', path: 'videos/480p/vid.mp4' },
         'input.mp4',
-        'output-tmp456-480p.mp4',
-        false,
-        '/tmp/videos/output-tmp456-480p.mp4'
+        '/tmp/videos/output-tmp456-480p.mp4',
+        false
       );
       expect(HetznerService.uploadBuffer).toHaveBeenCalled();
     });
@@ -458,7 +437,7 @@ describe('FFmpegService – Internal Methods', () => {
       });
       // transcodeVariant returns true/false — must return true so successCount increments
       const pvfSpy = jest.spyOn(ffmpegService, 'transcodeVariant').mockResolvedValue(true);
-      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupDir').mockImplementation(() => {});
 
       const result = await ffmpegService.processVideoVariants(baseOptions);
 
@@ -472,9 +451,9 @@ describe('FFmpegService – Internal Methods', () => {
       cleanupSpy.mockRestore();
     });
 
-    test('creates SHARED_VIDEO_PATH when directory does not exist', async () => {
-      mockFs.existsSync.mockReturnValue(false);
-
+    test('works in a private mkdtemp directory and always removes it', async () => {
+      const os = require('os');
+      const path = require('path');
       const probeSpy = jest.spyOn(ffmpegService, 'probeVideo').mockResolvedValue({
         width: 1920,
         height: 1080,
@@ -484,10 +463,14 @@ describe('FFmpegService – Internal Methods', () => {
         duration: 5,
       });
       const pvfSpy = jest.spyOn(ffmpegService, 'transcodeVariant').mockResolvedValue(true);
-      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupDir').mockImplementation(() => {});
 
       await ffmpegService.processVideoVariants(baseOptions);
-      expect(mockFs.mkdirSync).toHaveBeenCalledWith('/tmp/videos', { recursive: true });
+      expect(mockFs.mkdtempSync).toHaveBeenCalledWith(path.join(os.tmpdir(), 'xcl-transcode-'));
+      expect(probeSpy.mock.calls[0][0].startsWith('/tmp/xcl-transcode-test/')).toBe(true);
+      expect(pvfSpy.mock.calls[0][2].startsWith('/tmp/xcl-transcode-test/')).toBe(true);
+      expect(cleanupSpy).toHaveBeenCalledWith('/tmp/xcl-transcode-test');
+      expect(mockFs.mkdirSync).not.toHaveBeenCalledWith('/tmp/videos', expect.anything());
 
       probeSpy.mockRestore();
       pvfSpy.mockRestore();
@@ -504,7 +487,7 @@ describe('FFmpegService – Internal Methods', () => {
         duration: 5,
       });
       const pvfSpy = jest.spyOn(ffmpegService, 'transcodeVariant').mockResolvedValue(true);
-      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupDir').mockImplementation(() => {});
 
       const result = await ffmpegService.processVideoVariants(baseOptions);
       expect(result.variants).toBe(4);
@@ -518,7 +501,7 @@ describe('FFmpegService – Internal Methods', () => {
       const probeSpy = jest
         .spyOn(ffmpegService, 'probeVideo')
         .mockRejectedValue(new Error('probe crashed'));
-      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupDir').mockImplementation(() => {});
 
       await expect(ffmpegService.processVideoVariants(baseOptions)).rejects.toThrow(
         'probe crashed'
@@ -544,13 +527,35 @@ describe('FFmpegService – Internal Methods', () => {
       fakeReadable.pipe = jest.fn(() => fakeReadable);
       readableSpy = jest.spyOn(Readable, 'from').mockReturnValue(fakeReadable);
 
-      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupFile').mockImplementation(() => {});
+      const cleanupSpy = jest.spyOn(ffmpegService, 'cleanupDir').mockImplementation(() => {});
       await expect(ffmpegService.processVideoVariants(baseOptions)).rejects.toThrow(
         'ENOSPC: no space left'
       );
       expect(cleanupSpy).toHaveBeenCalled();
 
       cleanupSpy.mockRestore();
+    });
+  });
+
+  // ─── no shell, no docker (ARCH/O-7) ───────────────────────────────────────
+  describe('process invocation', () => {
+    test('probe runs ffprobe directly with the path as ONE argument (no shell)', async () => {
+      makeExecSucceed(validProbeOutput);
+      const hostile = '/tmp/x/$(touch pwned); rm -rf ~ .mp4';
+      await ffmpegService.probeVideo(hostile);
+      const [file, args] = mockExec.mock.calls[0];
+      expect(file).toBe('ffprobe');
+      expect(args[args.length - 1]).toBe(hostile);
+      expect(require('child_process').exec).not.toHaveBeenCalled();
+    });
+
+    test('transcode runs ffmpeg directly — never docker exec', async () => {
+      makeExecSucceed('');
+      await ffmpegService.strategyOptimal('/w/in.mp4', '/w/out.mp4', 720, true);
+      const [file, args] = mockExec.mock.calls[0];
+      expect(file).toBe('ffmpeg');
+      expect(args).toEqual(expect.arrayContaining(['-i', '/w/in.mp4', '-y', '/w/out.mp4']));
+      expect(cmdOf(0)).not.toMatch(/docker/);
     });
   });
 });
