@@ -1,19 +1,33 @@
+const path = require('path');
+// Must run BEFORE requiring infisical-loader — the loader reads its own
+// INFISICAL_* bootstrap creds from process.env at require time, and in a local
+// bare `node index.js` run those only exist after dotenv loads .env. (In
+// docker/dev/prod they're already real container env vars, so this ordering
+// bug was silent there — only local runs hit it.)
+require('dotenv').config({
+  path: path.join(__dirname, '.env'),
+});
+
 require('./infisical-loader')
   .bootstrap()
   .then(() => {
+    // ARCH-007: fail closed, not open. Without its internal credential (static token
+    // in dual mode, JWT secret in jwt mode) this service can't tell gateway traffic
+    // from a direct network caller — refuse to boot rather than run open.
+    require('./src/utils/internalAuth').assertInternalAuthConfigured();
     const express = require('express');
-    const path = require('path');
-    require('dotenv').config({
-      path: path.join(__dirname, '.env'),
-    });
     const corsMiddleware = require('./src/config/cors');
     const transcodeRouter = require('./src/routes/transcode');
     const posterRouter = require('./src/routes/poster');
-    const framesRouter = require('./src/routes/moderationMedia');
-    const transcribeRouter = require('./src/routes/transcribe');
     const logger = require('./src/config/logger');
 
     const app = express();
+    // ARCH-009: correlation id — mount FIRST so every log line + downstream hop shares one id.
+    app.use(require('./src/middleware/requestId'));
+    // ARCH-007 D12: x-user-id/x-admin-id are only honoured from verified internal callers.
+    app.use(require('./src/utils/internalAuth').stripUntrustedIdentityHeaders);
+    // ARCH-009: one access line per request (method/url/status/durationMs + id).
+    app.use(require('./src/middleware/httpLogger'));
     const PORT = process.env.PORT || 8567;
 
     // Middleware
@@ -24,8 +38,6 @@ require('./infisical-loader')
     // Routes
     app.use('/transcode', transcodeRouter);
     app.use('/poster', posterRouter);
-    app.use('/frames', framesRouter);
-    app.use('/transcribe', transcribeRouter);
 
     // Health check
     app.get('/health', (req, res) => {

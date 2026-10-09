@@ -1,13 +1,17 @@
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
+const { internalCaller } = require('../utils/internalAuth');
 
 dotenv.config();
 
-const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN;
-
+// ARCH-007: trusted internal caller (shared module) — signed service JWT via
+// x-internal-jwt (gateway) or Authorization: Bearer (direct service-to-service),
+// or the legacy static x-internal-token in INTERNAL_AUTH_MODE=dual only.
 function verifyToken(req, res, next) {
-  if (INTERNAL_TOKEN && req.headers['x-internal-token'] === INTERNAL_TOKEN) {
-    req.user = { internal: true };
+  const caller = internalCaller(req);
+  if (caller) {
+    req.user = { internal: true, ...caller };
+    req.internalCaller = caller;
     return next();
   }
 

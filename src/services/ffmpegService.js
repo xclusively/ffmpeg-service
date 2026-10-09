@@ -1,36 +1,31 @@
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const util = require('util');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const Queue = require('bull');
 const HetznerService = require('./HetznerService');
 const logger = require('../config/logger');
 const { Readable } = require('stream');
 
-const execAsync = util.promisify(exec);
+const execFileAsync = util.promisify(execFile);
 
-// Shared directory — bind-mounted on both ffmpeg-service and ffmpeg-worker containers
-// Host path: /tmp/xclusively-videos (see docker-compose.yml)
-const SHARED_VIDEO_PATH = '/tmp/videos';
+// ffmpeg/ffprobe run inside this image (Dockerfile installs ffmpeg). Previously every call
+// was `docker exec ffmpeg-worker …`, which required mounting the host Docker socket into
+// this container — i.e. a compromised ffmpeg-service could control Docker on the host.
+// Arguments are always passed as an array (execFile, no shell).
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
+// Each job gets its own private (0700, mkdtemp) directory under this root, removed after.
+const WORK_ROOT = process.env.VIDEO_WORK_DIR || os.tmpdir();
+const MAX_BUFFER = 16 * 1024 * 1024;
 
-// Whisper transcription (used by /transcribe for video moderation). Best-effort
-// and OFF by default — enable only once whisper-worker also mounts the shared
-// /tmp/videos volume (so it can read the extracted audio). When disabled, the
-// /transcribe endpoint returns a graceful skip and moderation proceeds on frames
-// + text fields alone.
-const WHISPER_ENABLED = process.env.WHISPER_ENABLED === 'true';
-const WHISPER_MODEL = process.env.WHISPER_MODEL || 'base';
-const WHISPER_COMMAND = process.env.WHISPER_COMMAND || 'whisper';
-const WHISPER_ARGS_TEMPLATE =
-  process.env.WHISPER_ARGS_TEMPLATE ||
-  '{input} --model {model} --output_format txt --output_dir {outdir}';
-// Base sampling fps for moderation frame extraction (adaptive per clip length).
-const MODERATION_BASE_FPS = Number.parseFloat(process.env.MODERATION_FPS || '0.5');
-
-const renderWhisperArgs = (template, replacements) =>
-  template.replace(/\{(\w+)\}/g, (match, key) =>
-    Object.prototype.hasOwnProperty.call(replacements, key) ? replacements[key] : match
-  );
+const runFfmpeg = (args, timeout) =>
+  execFileAsync(FFMPEG, ['-hide_banner', '-loglevel', 'error', ...args], {
+    timeout,
+    maxBuffer: MAX_BUFFER,
+  });
 
 // ---------------------------------------------------------------------------
 // Bull queue — backed by Redis
@@ -91,20 +86,16 @@ class FFmpegService {
   // Main processing — called inside the Bull worker
   // ---------------------------------------------------------------------------
   async processVideoVariants(options) {
-    const { fileKey, mediaContent, timestamp = Date.now() } = options;
-    let inputPath = null;
+    const { fileKey, mediaContent } = options;
+    let workDir = null;
 
     try {
       logger.info(`Starting transcoding for ${fileKey}`);
 
-      // ── 1. Write incoming base64 content to a temp file ──────────────────
-      const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
-      const inputFile = `input-${tempId}.mp4`;
-      inputPath = path.join(SHARED_VIDEO_PATH, inputFile);
-
-      if (!fs.existsSync(SHARED_VIDEO_PATH)) {
-        fs.mkdirSync(SHARED_VIDEO_PATH, { recursive: true });
-      }
+      // ── 1. Write incoming base64 content into a private per-job directory ──
+      workDir = fs.mkdtempSync(path.join(WORK_ROOT, 'xcl-transcode-'));
+      const tempId = crypto.randomUUID();
+      const inputPath = path.join(workDir, `input-${tempId}.mp4`);
 
       const buffer = Buffer.from(mediaContent, 'base64');
       await new Promise((resolve, reject) => {
@@ -119,7 +110,7 @@ class FFmpegService {
       logger.info(`Wrote ${buffer.length} bytes to ${inputPath}`);
 
       // ── 2. Probe the input to get real dimensions ─────────────────────────
-      const probe = await this.probeVideo(inputFile);
+      const probe = await this.probeVideo(inputPath);
       logger.info(
         `Probe result: ${probe.width}x${probe.height}, audio=${probe.hasAudio}, codec=${probe.codec}`
       );
@@ -146,17 +137,10 @@ class FFmpegService {
       // ── 4. Transcode each variant (sequentially to avoid OOM) ───────────
       let successCount = 0;
       for (const target of targets) {
-        const outputFile = `output-${tempId}-${target.h}p.mp4`;
-        const outputPath = path.join(SHARED_VIDEO_PATH, outputFile);
+        const outputPath = path.join(workDir, `output-${tempId}-${target.h}p.mp4`);
 
         try {
-          const ok = await this.transcodeVariant(
-            target,
-            inputFile,
-            outputFile,
-            probe.hasAudio,
-            outputPath
-          );
+          const ok = await this.transcodeVariant(target, inputPath, outputPath, probe.hasAudio);
           if (ok) successCount++;
         } finally {
           this.cleanupFile(outputPath);
@@ -171,7 +155,7 @@ class FFmpegService {
       logger.error(`Transcoding pipeline failed for ${fileKey}: ${error.message}`);
       throw error;
     } finally {
-      if (inputPath) this.cleanupFile(inputPath);
+      if (workDir) this.cleanupDir(workDir);
     }
   }
 
@@ -202,22 +186,22 @@ class FFmpegService {
   // ---------------------------------------------------------------------------
   // Transcoding a single variant — tries strategies in order, uploads on success
   // ---------------------------------------------------------------------------
-  async transcodeVariant(target, inputFile, outputFile, hasAudio, outputPath) {
-    logger.info(`Transcoding → ${target.h}p (output: ${outputFile})`);
+  async transcodeVariant(target, inputPath, outputPath, hasAudio) {
+    logger.info(`Transcoding → ${target.h}p (output: ${path.basename(outputPath)})`);
 
     // Strategies from best quality to last resort.
     // All use scale=-2:height so aspect ratio is always preserved (portrait or landscape).
     const strategies = [
       // 1. Optimal — H.264 veryfast, proper audio normalisation
-      () => this.strategyOptimal(inputFile, outputFile, target.h, hasAudio),
+      () => this.strategyOptimal(inputPath, outputPath, target.h, hasAudio),
       // 2. Conservative — medium preset, slightly more compatible
-      () => this.strategyConservative(inputFile, outputFile, target.h, hasAudio),
+      () => this.strategyConservative(inputPath, outputPath, target.h, hasAudio),
       // 3. Simple — ultrafast, stream-copy audio
-      () => this.strategySimple(inputFile, outputFile, target.h, hasAudio),
+      () => this.strategySimple(inputPath, outputPath, target.h, hasAudio),
       // 4. Fast re-encode — ultrafast + aac, very low quality but always produces output
-      () => this.strategyFastReencode(inputFile, outputFile, target.h),
+      () => this.strategyFastReencode(inputPath, outputPath, target.h),
       // 5. Last resort — mpeg4 container, preserves aspect ratio, maximum compatibility
-      () => this.strategyLastResort(inputFile, outputFile, target.h),
+      () => this.strategyLastResort(inputPath, outputPath, target.h),
     ];
 
     for (let i = 0; i < strategies.length; i++) {
@@ -256,82 +240,147 @@ class FFmpegService {
   // This works correctly for both landscape AND portrait videos.
   // ---------------------------------------------------------------------------
 
-  async strategyOptimal(inputFile, outputFile, height, hasAudio) {
-    let cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -profile:v main -level 4.0 ` +
-      `-movflags +faststart -g 48 -keyint_min 48 `;
-
-    cmd += hasAudio ? `-c:a aac -b:a 128k -ar 44100 -ac 2 ` : `-an `;
-    cmd += `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 600000 });
+  async strategyOptimal(inputPath, outputPath, height, hasAudio) {
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-profile:v',
+        'main',
+        '-level',
+        '4.0',
+        '-movflags',
+        '+faststart',
+        '-g',
+        '48',
+        '-keyint_min',
+        '48',
+        ...(hasAudio ? ['-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2'] : ['-an']),
+        '-y',
+        outputPath,
+      ],
+      600000
+    );
   }
 
-  async strategyConservative(inputFile, outputFile, height, hasAudio) {
-    let cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v libx264 -preset medium -crf 26 -pix_fmt yuv420p ` +
-      `-movflags +faststart `;
-
-    cmd += hasAudio ? `-c:a aac -b:a 96k ` : `-an `;
-    cmd += `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 600000 });
+  async strategyConservative(inputPath, outputPath, height, hasAudio) {
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'medium',
+        '-crf',
+        '26',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        '+faststart',
+        ...(hasAudio ? ['-c:a', 'aac', '-b:a', '96k'] : ['-an']),
+        '-y',
+        outputPath,
+      ],
+      600000
+    );
   }
 
-  async strategySimple(inputFile, outputFile, height, hasAudio) {
-    let cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v libx264 -preset ultrafast -crf 30 `;
-
-    cmd += hasAudio ? `-c:a copy ` : `-an `;
-    cmd += `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 300000 });
+  async strategySimple(inputPath, outputPath, height, hasAudio) {
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '30',
+        ...(hasAudio ? ['-c:a', 'copy'] : ['-an']),
+        '-y',
+        outputPath,
+      ],
+      300000
+    );
   }
 
-  async strategyFastReencode(inputFile, outputFile, height) {
+  async strategyFastReencode(inputPath, outputPath, height) {
     // Does NOT stream-copy — uses ultrafast + force audio encode.
     // Works even when the source audio codec is incompatible.
-    const cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v libx264 -preset ultrafast -crf 35 ` +
-      `-c:a aac -b:a 64k ` +
-      `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 300000 });
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '35',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '64k',
+        '-y',
+        outputPath,
+      ],
+      300000
+    );
   }
 
-  async strategyLastResort(inputFile, outputFile, height) {
+  async strategyLastResort(inputPath, outputPath, height) {
     // mpeg4 container — maximum compatibility.
     // Uses -2 to preserve aspect ratio (portrait AND landscape safe).
-    const cmd =
-      `docker exec ffmpeg-worker ffmpeg -i /tmp/videos/${inputFile} ` +
-      `-vf "scale=-2:${height}" ` +
-      `-c:v mpeg4 -b:v 1000k ` +
-      `-c:a mp3 -b:a 128k ` +
-      `-f mp4 ` +
-      `-y /tmp/videos/${outputFile}`;
-
-    await execAsync(cmd, { timeout: 300000 });
+    await runFfmpeg(
+      [
+        '-i',
+        inputPath,
+        '-vf',
+        `scale=-2:${height}`,
+        '-c:v',
+        'mpeg4',
+        '-b:v',
+        '1000k',
+        '-c:a',
+        'mp3',
+        '-b:a',
+        '128k',
+        '-f',
+        'mp4',
+        '-y',
+        outputPath,
+      ],
+      300000
+    );
   }
 
   // ---------------------------------------------------------------------------
-  // ffprobe — get actual video dimensions from the shared volume
+  // ffprobe — get actual video dimensions
   // ---------------------------------------------------------------------------
-  async probeVideo(inputFile) {
+  async probeVideo(inputPath) {
     try {
-      const cmd =
-        `docker exec ffmpeg-worker ffprobe ` +
-        `-v quiet -print_format json -show_format -show_streams ` +
-        `/tmp/videos/${inputFile}`;
-
-      const { stdout } = await execAsync(cmd, { timeout: 30000 });
+      const { stdout } = await execFileAsync(
+        FFPROBE,
+        ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', inputPath],
+        { timeout: 30000, maxBuffer: MAX_BUFFER }
+      );
       const probe = JSON.parse(stdout);
 
       const videoStream = probe.streams.find((s) => s.codec_type === 'video');
@@ -388,168 +437,6 @@ class FFmpegService {
   }
 
   // ---------------------------------------------------------------------------
-  // Adaptive fps — scale sampling DOWN for longer videos so the total extracted
-  // frame count stays ~maxFrames regardless of clip length. A 30s clip samples
-  // at the base fps; a 10-minute clip samples proportionally slower, spreading
-  // ~maxFrames across the whole duration. Keeps ffmpeg output + the downstream
-  // Rekognition call count bounded for large files.
-  // ---------------------------------------------------------------------------
-  computeAdaptiveFps(durationSeconds, maxFrames, baseFps) {
-    if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return baseFps;
-    const frames = Number.isFinite(maxFrames) && maxFrames > 0 ? maxFrames : 20;
-    const spreadFps = frames / durationSeconds;
-    const fps = Math.min(baseFps, spreadFps);
-    return fps > 0 ? fps : baseFps; // ffmpeg needs a positive fps
-  }
-
-  // ---------------------------------------------------------------------------
-  // Frame extraction for MODERATION — returns sampled frames as base64 JPGs so
-  // the CALLER (verify-service) runs AWS Rekognition on them in-memory. This is
-  // what lets verify-service stay free of ffmpeg / the Docker socket / temp files.
-  //
-  // Throws on hard failure (no frames producible) so the caller treats it as a
-  // moderation error and fail-safes (queues for human review) rather than
-  // silently passing an un-inspected video.
-  // ---------------------------------------------------------------------------
-  async extractFrames({
-    mediaContent,
-    maxFrames = 20,
-    fps,
-    startSeconds,
-    durationSeconds,
-    timestamp = Date.now(),
-  }) {
-    const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
-    const inputFile = `frames-in-${tempId}.mp4`;
-    const framesDirName = `frames-${tempId}`;
-    const inputPath = path.join(SHARED_VIDEO_PATH, inputFile);
-    const framesDir = path.join(SHARED_VIDEO_PATH, framesDirName);
-
-    try {
-      if (!fs.existsSync(SHARED_VIDEO_PATH)) {
-        fs.mkdirSync(SHARED_VIDEO_PATH, { recursive: true });
-      }
-      fs.mkdirSync(framesDir, { recursive: true });
-
-      const buffer = Buffer.from(mediaContent, 'base64');
-      await new Promise((resolve, reject) => {
-        const readable = Readable.from(buffer);
-        const writeStream = fs.createWriteStream(inputPath);
-        readable.pipe(writeStream);
-        readable.on('error', reject);
-        writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
-      });
-
-      const probe = await this.probeVideo(inputFile);
-      const clipDuration = probe.duration || 0;
-      const windowSeconds = Number.isFinite(durationSeconds) ? durationSeconds : clipDuration;
-      const useFps =
-        Number.isFinite(fps) && fps > 0
-          ? fps
-          : this.computeAdaptiveFps(windowSeconds, maxFrames, MODERATION_BASE_FPS);
-      const frameCap = Number.isFinite(maxFrames) && maxFrames > 0 ? maxFrames : 20;
-
-      const args = [];
-      if (Number.isFinite(startSeconds) && startSeconds > 0) args.push(`-ss ${startSeconds}`);
-      args.push(`-i /tmp/videos/${inputFile}`);
-      if (Number.isFinite(durationSeconds) && durationSeconds > 0)
-        args.push(`-t ${durationSeconds}`);
-      args.push(
-        `-vf fps=${useFps} -frames:v ${frameCap} "/tmp/videos/${framesDirName}/frame_%03d.jpg"`
-      );
-
-      const cmd = `docker exec ffmpeg-worker ffmpeg -hide_banner -loglevel error ${args.join(' ')}`;
-      await execAsync(cmd, { timeout: 120000 });
-
-      const frames = fs
-        .readdirSync(framesDir)
-        .filter((file) => file.toLowerCase().endsWith('.jpg'))
-        .sort()
-        .slice(0, frameCap)
-        .map((file) => fs.readFileSync(path.join(framesDir, file)).toString('base64'));
-
-      logger.info(
-        `Extracted ${frames.length} moderation frame(s) (dur=${clipDuration}s, fps=${useFps})`
-      );
-      return {
-        frames,
-        width: probe.width || null,
-        height: probe.height || null,
-        durationSeconds: clipDuration,
-      };
-    } finally {
-      this.cleanupFile(inputPath);
-      this.cleanupDir(framesDir);
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Transcription for MODERATION — extracts audio via ffmpeg-worker, runs whisper
-  // via whisper-worker, returns the transcript text. Best-effort: never throws —
-  // returns { skipped, reason } so moderation proceeds on frames + text alone.
-  // Requires whisper-worker to also mount the shared /tmp/videos volume; guarded
-  // behind WHISPER_ENABLED so it stays a graceful no-op until that infra is in place.
-  // ---------------------------------------------------------------------------
-  async transcribeAudio({ mediaContent, timestamp = Date.now() }) {
-    if (!WHISPER_ENABLED) {
-      return { transcript: '', skipped: true, reason: 'whisper_disabled' };
-    }
-
-    const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
-    const inputFile = `tr-in-${tempId}.mp4`;
-    const audioName = `tr-${tempId}`;
-    const audioFile = `${audioName}.wav`;
-    const inputPath = path.join(SHARED_VIDEO_PATH, inputFile);
-    const audioPath = path.join(SHARED_VIDEO_PATH, audioFile);
-    const transcriptPath = path.join(SHARED_VIDEO_PATH, `${audioName}.txt`);
-
-    try {
-      if (!fs.existsSync(SHARED_VIDEO_PATH)) {
-        fs.mkdirSync(SHARED_VIDEO_PATH, { recursive: true });
-      }
-
-      const buffer = Buffer.from(mediaContent, 'base64');
-      await new Promise((resolve, reject) => {
-        const readable = Readable.from(buffer);
-        const writeStream = fs.createWriteStream(inputPath);
-        readable.pipe(writeStream);
-        readable.on('error', reject);
-        writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
-      });
-
-      await execAsync(
-        `docker exec ffmpeg-worker ffmpeg -hide_banner -loglevel error ` +
-          `-i /tmp/videos/${inputFile} -vn -ac 1 -ar 16000 -f wav -y /tmp/videos/${audioFile}`,
-        { timeout: 180000 }
-      );
-
-      const whisperArgs = renderWhisperArgs(WHISPER_ARGS_TEMPLATE, {
-        input: `/tmp/videos/${audioFile}`,
-        model: WHISPER_MODEL,
-        outdir: '/tmp/videos',
-        output: `/tmp/videos/${audioName}`,
-      });
-      await execAsync(`docker exec whisper-worker ${WHISPER_COMMAND} ${whisperArgs}`, {
-        timeout: 600000,
-      });
-
-      const transcript = fs.existsSync(transcriptPath)
-        ? fs.readFileSync(transcriptPath, 'utf8')
-        : '';
-      return { transcript, skipped: false };
-    } catch (error) {
-      logger.warn(`Whisper transcription failed: ${error.message}`);
-      return { transcript: '', skipped: true, reason: 'whisper_failed' };
-    } finally {
-      this.cleanupFile(inputPath);
-      this.cleanupFile(audioPath);
-      this.cleanupFile(transcriptPath);
-    }
-  }
-
-  // ---------------------------------------------------------------------------
   // Poster frame — SYNCHRONOUS single-frame extraction for a <video poster>.
   //
   // One still per video, scaled to <= `width` px wide at the video's native aspect
@@ -557,18 +444,16 @@ class FFmpegService {
   // sole writer of post_media) uploads it to Hetzner and records thumbnail_url —
   // this service stays stateless. Best-effort: returns null on any failure so the
   // upload still succeeds with no poster (frontend falls back to preload=metadata).
+  //
+  // Runs ffmpeg IN-PROCESS via runFfmpeg (execFile, no docker socket) in a private
+  // per-job mkdtemp dir — same model as transcode (ARCH-007 D6).
   // ---------------------------------------------------------------------------
-  async generatePoster({ mediaContent, timestamp = Date.now(), width = 720 }) {
-    const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
-    const inputFile = `poster-in-${tempId}.mp4`;
-    const outputFile = `poster-out-${tempId}.webp`;
-    const inputPath = path.join(SHARED_VIDEO_PATH, inputFile);
-    const outputPath = path.join(SHARED_VIDEO_PATH, outputFile);
-
+  async generatePoster({ mediaContent, width = 720 }) {
+    let workDir = null;
     try {
-      if (!fs.existsSync(SHARED_VIDEO_PATH)) {
-        fs.mkdirSync(SHARED_VIDEO_PATH, { recursive: true });
-      }
+      workDir = fs.mkdtempSync(path.join(WORK_ROOT, 'xcl-poster-'));
+      const inputPath = path.join(workDir, 'input.mp4');
+      const outputPath = path.join(workDir, 'poster.webp');
 
       const buffer = Buffer.from(mediaContent, 'base64');
       await new Promise((resolve, reject) => {
@@ -580,18 +465,33 @@ class FFmpegService {
         writeStream.on('error', reject);
       });
 
-      const probe = await this.probeVideo(inputFile);
+      const probe = await this.probeVideo(inputPath);
       // Seek ~10% in (capped at 1s) to skip a black/leader first frame; 0 for very
       // short clips or when duration is unknown.
       const seek = probe.duration > 0 ? Math.min(1, probe.duration * 0.1) : 0;
 
-      const extract = async (ss) => {
-        const cmd =
-          `docker exec ffmpeg-worker ffmpeg -ss ${ss} -i /tmp/videos/${inputFile} ` +
-          `-frames:v 1 -vf "scale='min(${width},iw)':-2" ` +
-          `-c:v libwebp -q:v 80 -y /tmp/videos/${outputFile}`;
-        await execAsync(cmd, { timeout: 60000 });
-      };
+      // Cap width at the source width without upscaling. The comma inside min() is
+      // escaped (\,) because execFile passes the filtergraph verbatim (no shell).
+      const extract = (ss) =>
+        runFfmpeg(
+          [
+            '-ss',
+            String(ss),
+            '-i',
+            inputPath,
+            '-frames:v',
+            '1',
+            '-vf',
+            `scale=min(${width}\\,iw):-2`,
+            '-c:v',
+            'libwebp',
+            '-q:v',
+            '80',
+            '-y',
+            outputPath,
+          ],
+          60000
+        );
 
       const produced = () => fs.existsSync(outputPath) && fs.statSync(outputPath).size > 64;
 
@@ -626,8 +526,7 @@ class FFmpegService {
       logger.error(`Poster generation failed: ${error.message}`);
       return null;
     } finally {
-      this.cleanupFile(inputPath);
-      this.cleanupFile(outputPath);
+      if (workDir) this.cleanupDir(workDir);
     }
   }
 
@@ -645,14 +544,13 @@ class FFmpegService {
     }
   }
 
+  // Remove a per-job working directory and everything in it.
   cleanupDir(dirPath) {
     try {
-      if (fs.existsSync(dirPath)) {
-        fs.rmSync(dirPath, { recursive: true, force: true });
-        logger.debug(`Cleaned up dir ${dirPath}`);
-      }
+      fs.rmSync(dirPath, { recursive: true, force: true });
+      logger.debug(`Cleaned up ${dirPath}`);
     } catch (e) {
-      logger.warn(`Failed to clean up dir ${dirPath}: ${e.message}`);
+      logger.warn(`Failed to clean up ${dirPath}: ${e.message}`);
     }
   }
 }
