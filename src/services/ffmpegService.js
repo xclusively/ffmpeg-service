@@ -369,6 +369,88 @@ class FFmpegService {
   }
 
   // ---------------------------------------------------------------------------
+  // Poster frame — SYNCHRONOUS single-frame extraction for a <video poster>.
+  //
+  // One still per video, scaled to <= `width` px wide at the video's native aspect
+  // (portrait-safe), encoded WebP. Returns base64 so the CALLER (post-service, the
+  // sole writer of post_media) uploads it to Hetzner and records thumbnail_url —
+  // this service stays stateless. Best-effort: returns null on any failure so the
+  // upload still succeeds with no poster (frontend falls back to preload=metadata).
+  // ---------------------------------------------------------------------------
+  async generatePoster({ mediaContent, timestamp = Date.now(), width = 720 }) {
+    const tempId = `${timestamp}-${Math.random().toString(36).substring(7)}`;
+    const inputFile = `poster-in-${tempId}.mp4`;
+    const outputFile = `poster-out-${tempId}.webp`;
+    const inputPath = path.join(SHARED_VIDEO_PATH, inputFile);
+    const outputPath = path.join(SHARED_VIDEO_PATH, outputFile);
+
+    try {
+      if (!fs.existsSync(SHARED_VIDEO_PATH)) {
+        fs.mkdirSync(SHARED_VIDEO_PATH, { recursive: true });
+      }
+
+      const buffer = Buffer.from(mediaContent, 'base64');
+      await new Promise((resolve, reject) => {
+        const readable = Readable.from(buffer);
+        const writeStream = fs.createWriteStream(inputPath);
+        readable.pipe(writeStream);
+        readable.on('error', reject);
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+      });
+
+      const probe = await this.probeVideo(inputFile);
+      // Seek ~10% in (capped at 1s) to skip a black/leader first frame; 0 for very
+      // short clips or when duration is unknown.
+      const seek = probe.duration > 0 ? Math.min(1, probe.duration * 0.1) : 0;
+
+      const extract = async (ss) => {
+        const cmd =
+          `docker exec ffmpeg-worker ffmpeg -ss ${ss} -i /tmp/videos/${inputFile} ` +
+          `-frames:v 1 -vf "scale='min(${width},iw)':-2" ` +
+          `-c:v libwebp -q:v 80 -y /tmp/videos/${outputFile}`;
+        await execAsync(cmd, { timeout: 60000 });
+      };
+
+      const produced = () => fs.existsSync(outputPath) && fs.statSync(outputPath).size > 64;
+
+      try {
+        await extract(seek);
+      } catch (e) {
+        logger.warn(`Poster extract at ss=${seek} failed: ${e.message}; retrying at 0`);
+      }
+      if (!produced()) {
+        try {
+          await extract(0);
+        } catch (e) {
+          logger.warn(`Poster extract at ss=0 failed: ${e.message}`);
+        }
+      }
+      if (!produced()) {
+        logger.error('Poster generation produced no output');
+        return null;
+      }
+
+      const posterBuffer = fs.readFileSync(outputPath);
+      logger.info(
+        `Poster generated (${posterBuffer.length} bytes, ${probe.width}x${probe.height})`
+      );
+      return {
+        poster: posterBuffer.toString('base64'),
+        contentType: 'image/webp',
+        width: probe.width || null,
+        height: probe.height || null,
+      };
+    } catch (error) {
+      logger.error(`Poster generation failed: ${error.message}`);
+      return null;
+    } finally {
+      this.cleanupFile(inputPath);
+      this.cleanupFile(outputPath);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
   cleanupFile(filePath) {
