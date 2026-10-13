@@ -110,17 +110,21 @@ pipeline {
         failure {
             echo "🚨 Deployment failed! Rolling back to previous container..."
             sh """
-                # Stop and remove the failed new container
-                docker stop ${CONTAINER_NAME} || true
-                docker rm -f ${CONTAINER_NAME} || true
-                
-                # Restore the backup container if it exists
+                # Roll back ONLY what this run changed. A failure before Deploy (secret scan,
+                # build, push, env sync) never touched the running container — removing it
+                # anyway took dev-next-frontend down on 2026-10-08 (build failed, no backup).
                 if [ \$(docker ps -aq -f name=^/${CONTAINER_NAME}-backup\$) ]; then
+                    # Deploy started: drop the failed new container, restore the previous one.
+                    docker rm -f ${CONTAINER_NAME} || true
                     docker rename ${CONTAINER_NAME}-backup ${CONTAINER_NAME}
                     docker start ${CONTAINER_NAME}
                     echo "✅ Rollback complete: Previous version restored."
+                elif [ "\$(docker inspect -f '{{.Config.Image}}' ${CONTAINER_NAME} 2>/dev/null)" = "${FULL_IMAGE}" ]; then
+                    # First deploy of this service failed: nothing older to restore.
+                    docker rm -f ${CONTAINER_NAME} || true
+                    echo "⚠️ No backup found to rollback to (first deploy) — failed container removed."
                 else
-                    echo "⚠️ No backup found to rollback to."
+                    echo "ℹ️ Failed before Deploy — running container left untouched."
                 fi
                 
                 # Cleanup the failed image to save space
