@@ -16,6 +16,23 @@ const CACHE_DIR = process.env.INFISICAL_CACHE_DIR || path.join(__dirname, '.infi
 // Cache file name derived from service path so each service has its own file
 const CACHE_NAME = (SVC_PATH || 'default').replace(/\//g, '_').replace(/^_/, '');
 
+// Path to the .env file (shared with docker run --env-file / -v mount).
+const ENV_FILE = process.env.INFISICAL_ENV_FILE || path.join(__dirname, '.env');
+
+// Infisical bootstrap credential keys — excluded when counting .env app secrets,
+// so a .env that holds ONLY these doesn't count as a usable fallback.
+const INFISICAL_CRED_KEYS = new Set([
+  'INFISICAL_SITE_URL',
+  'INFISICAL_CLIENT_ID',
+  'INFISICAL_CLIENT_SECRET',
+  'INFISICAL_PROJECT_ID',
+  'INFISICAL_ENV',
+  'INFISICAL_SECRET_PATH',
+  'INFISICAL_POLL_SEC',
+  'INFISICAL_CACHE_DIR',
+  'INFISICAL_ENV_FILE',
+]);
+
 function _cacheKey() {
   return crypto
     .createHash('sha256')
@@ -48,6 +65,21 @@ function _readCache() {
   } catch {
     return null;
   }
+}
+
+function _readEnvFile() {
+  const result = {};
+  try {
+    for (const line of fs.readFileSync(ENV_FILE, 'utf8').split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const idx = t.indexOf('=');
+      if (idx > 0) result[t.slice(0, idx)] = t.slice(idx + 1);
+    }
+  } catch {
+    /* file may not exist */
+  }
+  return result;
 }
 
 function _applyToEnv(secrets) {
@@ -94,16 +126,31 @@ async function bootstrap() {
     console.log(`[infisical] loaded ${Object.keys(secrets).length} secrets (${ENV}${SVC_PATH})`);
   } catch (err) {
     console.warn(`[infisical] fetch failed — ${err.message}`);
+    // Fallback 1: encrypted disk cache (survives restarts, written after a good fetch).
     secrets = _readCache();
-    if (!secrets) {
-      throw new Error(
-        `[infisical] Infisical unreachable AND no disk cache — refusing to start. ` +
-          `Original error: ${err.message}`
+    if (secrets) {
+      console.warn(
+        `[infisical] loaded ${Object.keys(secrets).length} secrets from disk cache (degraded mode)`
       );
+    } else {
+      // Fallback 2: .env file (dev / no-Infisical mode). Strip the Infisical bootstrap
+      // creds so only real app secrets count toward a usable fallback.
+      const envFallback = _readEnvFile();
+      const appSecrets = Object.fromEntries(
+        Object.entries(envFallback).filter(([k]) => !INFISICAL_CRED_KEYS.has(k))
+      );
+      if (Object.keys(appSecrets).length > 0) {
+        secrets = appSecrets;
+        console.warn(
+          `[infisical] loaded ${Object.keys(secrets).length} secrets from .env fallback (degraded mode)`
+        );
+      } else {
+        throw new Error(
+          `[infisical] Infisical unreachable, no disk cache, and no .env fallback — refusing to start. ` +
+            `Original error: ${err.message}`
+        );
+      }
     }
-    console.warn(
-      `[infisical] loaded ${Object.keys(secrets).length} secrets from disk cache (degraded mode)`
-    );
   }
   _applyToEnv(secrets);
 
