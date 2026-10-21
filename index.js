@@ -8,8 +8,11 @@ require('dotenv').config({
   path: path.join(__dirname, '.env'),
 });
 
-require('./infisical-loader')
-  .bootstrap()
+// --- Infisical DISABLED for dev (2026-10-21): boot from .env / docker --env-file only.
+//     Restore later by uncommenting the require/.bootstrap() lines and deleting Promise.resolve().
+// require('./infisical-loader')
+//   .bootstrap()
+Promise.resolve()
   .then(() => {
     // ARCH-007: fail closed, not open. Without its internal credential (static token
     // in dual mode, JWT secret in jwt mode) this service can't tell gateway traffic
