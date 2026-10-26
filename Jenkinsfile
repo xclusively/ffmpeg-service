@@ -69,6 +69,7 @@ pipeline {
                             --name ${CONTAINER_NAME} \
                             --network xclusively-network \
                             --env-file /home/devops/xclusively/${SERVICE_NAME}/.env \
+                            -v /home/devops/xclusively/${SERVICE_NAME}/.env:/app/.env \
                             --restart unless-stopped \
                             ${FULL_IMAGE}
                         
