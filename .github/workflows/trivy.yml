@@ -30,12 +30,29 @@ jobs:
           key: trivy-db-${{ github.run_id }}
           restore-keys: trivy-db-
 
+      # Pin the version so install.sh skips the (unauthenticated, rate-limited)
+      # GitHub "latest release" API lookup, and retry so a transient DNS/network
+      # blip on the runner (curl exit 6) doesn't abort the job. Non-fatal: a
+      # persistent failure degrades to an empty report instead of a red X.
       - name: Install Trivy
-        run: curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+        continue-on-error: true
+        run: |
+          for i in 1 2 3; do
+            if curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+                 | sh -s -- -b /usr/local/bin v0.76.1; then
+              break
+            fi
+            echo "Trivy install attempt $i failed (likely transient network); retrying in 10s..."
+            sleep 10
+          done
+          trivy --version || echo "::warning::Trivy could not be installed; the security report will be empty (non-blocking)."
 
       # Report only — `|| true` so a nonzero Trivy exit never fails the job.
-      # Trivy reads .trivyignore automatically for accepted findings.
+      # `if: always()` guarantees the report file is created even if the install
+      # step above did not (so the summary/artifact/comment steps never hit a
+      # missing file). Trivy reads .trivyignore automatically for accepted findings.
       - name: Scan and build report (never fails)
+        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -69,13 +86,14 @@ jobs:
 
       - name: Publish to job summary
         if: always()
-        run: cat security/trivy-report.md >> "$GITHUB_STEP_SUMMARY"
+        run: cat security/trivy-report.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "Trivy report unavailable (scan did not produce output)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload report artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-report
+          if-no-files-found: ignore
           path: |
             security/trivy-report.md
             security/trivy-sca.json
@@ -89,6 +107,10 @@ jobs:
           script: |
             const fs = require('fs');
             const marker = '<!-- trivy-report -->';
+            if (!fs.existsSync('security/trivy-report.md')) {
+              core.info('No trivy-report.md produced; skipping PR comment.');
+              return;
+            }
             let body = fs.readFileSync('security/trivy-report.md', 'utf8');
             const MAX = 60000;
             if (body.length > MAX) {
