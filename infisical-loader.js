@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 
 const SITE_URL = process.env.INFISICAL_SITE_URL;
@@ -11,7 +12,9 @@ const PROJECT_ID = process.env.INFISICAL_PROJECT_ID;
 const ENV = process.env.INFISICAL_ENV || 'development';
 const SVC_PATH = process.env.INFISICAL_SECRET_PATH; // e.g. '/auth-microservice'
 const POLL_MS = (parseInt(process.env.INFISICAL_POLL_SEC, 10) || 900) * 1000;
-const CACHE_DIR = process.env.INFISICAL_CACHE_DIR || path.join(__dirname, '.infisical-cache');
+// Encrypted cache next to the code by default. Containers run as a non-root user that can't
+// write there, so it falls back to the OS temp dir (inside the container, survives a restart).
+const CACHE_DIR = process.env.INFISICAL_CACHE_DIR || _defaultCacheDir();
 
 // Cache file name derived from service path so each service has its own file
 const CACHE_NAME = (SVC_PATH || 'default').replace(/\//g, '_').replace(/^_/, '');
@@ -40,6 +43,26 @@ function _cacheKey() {
     .digest();
 }
 
+function _defaultCacheDir() {
+  const local = path.join(__dirname, '.infisical-cache');
+  try {
+    fs.mkdirSync(local, { recursive: true });
+    fs.accessSync(local, fs.constants.W_OK);
+    return local;
+  } catch {
+    return path.join(os.tmpdir(), 'infisical-cache');
+  }
+}
+
+// A write failure is logged once per process: the 15-minute refresh would repeat it all day.
+const _warned = new Set();
+function _warnOnce(what, e) {
+  const key = `${what}:${e.code || e.message}`;
+  if (_warned.has(key)) return;
+  _warned.add(key);
+  console.warn(`[infisical] ${what} failed: ${e.message} (logged once)`);
+}
+
 function _writeCache(secrets) {
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -52,7 +75,7 @@ function _writeCache(secrets) {
       { mode: 0o600 }
     );
   } catch (e) {
-    console.warn(`[infisical] cache write failed: ${e.message}`);
+    _warnOnce('cache write', e);
   }
 }
 
