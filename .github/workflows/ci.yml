@@ -3,14 +3,118 @@ name: CI/CD Pipeline
 on:
   push:
     branches: ['main', 'dev']
+    paths-ignore: ['**/*.md']
   pull_request:
     branches: ['main', 'dev']
+    paths-ignore: ['**/*.md']
+  # Nightly: full lint + full test + dependency audit.
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+# Least privilege: jobs only need to read the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref (new push to a PR, etc.).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build, Lint, and Test
+  lint:
+    name: Lint and Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Linter Check
+        run: npm run lint:dry-run
+
+      - name: Run Formatter Check
+        run: npm run format:dry-run
+
+  test:
+    name: Tests
     runs-on: ubuntu-latest
 
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # Full history only when we need to diff against origin/dev (PRs into dev).
+          # Strings on purpose: in GitHub expressions `cond && 0 || 1` always yields 1 (0 is falsy).
+          fetch-depth: ${{ (github.event_name == 'pull_request' && github.base_ref == 'dev') && '0' || '1' }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # PRs into dev run only tests related to changed files, unless the change
+      # touches something that can affect every test (deps, jest config, test
+      # setup, shared source, CI itself). Everything else runs the full suite.
+      - name: Select test mode
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -eu
+          MODE=full
+          if [ "$EVENT_NAME" = "pull_request" ] && [ "$BASE_REF" = "dev" ]; then
+            CHANGED=$(git diff --name-only origin/dev...HEAD)
+            echo "Files changed vs origin/dev:"
+            echo "$CHANGED"
+            if echo "$CHANGED" | grep -Eq '^(package\.json|package-lock\.json|jest\.config\.js|src/config/|\.github/)'; then
+              echo "Global-impact file changed - forcing full suite."
+            else
+              MODE=changed
+            fi
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Test mode selected: $MODE"
+
+      - name: Cache Jest
+        uses: actions/cache@v4
+        with:
+          path: .jest-cache
+          key: jest-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('src/**', '__tests__/**') }}
+          restore-keys: |
+            jest-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
+            jest-${{ runner.os }}-
+
+      - name: Run Tests
+        env:
+          TEST_MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          set -eu
+          echo "Running tests in mode: $TEST_MODE"
+          if [ "$TEST_MODE" = "changed" ]; then
+            npx jest --ci --cacheDirectory=.jest-cache --changedSince=origin/dev --passWithNoTests
+          else
+            npx jest --ci --cacheDirectory=.jest-cache
+          fi
+
+  # Every run (push, PR, nightly, manual), in parallel with lint/test. Advisory only.
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -27,12 +131,3 @@ jobs:
       - name: Security Audit
         run: npm audit --audit-level=high
         continue-on-error: true
-
-      - name: Run Linter Check
-        run: npm run lint:dry-run
-
-      - name: Run Formatter Check
-        run: npm run format:dry-run
-
-      - name: Run Tests
-        run: npm run test

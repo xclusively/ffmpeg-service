@@ -4,7 +4,7 @@ import unusedImports from 'eslint-plugin-unused-imports';
 
 export default [
   {
-    ignores: ['node_modules/', 'dist/', 'build/', 'coverage/', '.git/'],
+    ignores: ['node_modules/', 'dist/', 'build/', 'coverage/', '.git/', '.jest-cache/'],
   },
   {
     files: ['**/*.js'],
