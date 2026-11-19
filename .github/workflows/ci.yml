@@ -47,6 +47,8 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    # A hung Jest process (open handle) must fail the job, not block CI for 6 hours.
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repository
@@ -105,9 +107,9 @@ jobs:
           set -eu
           echo "Running tests in mode: $TEST_MODE"
           if [ "$TEST_MODE" = "changed" ]; then
-            npx jest --ci --cacheDirectory=.jest-cache --changedSince=origin/dev --passWithNoTests
+            npx jest --ci --forceExit --cacheDirectory=.jest-cache --changedSince=origin/dev --passWithNoTests
           else
-            npx jest --ci --cacheDirectory=.jest-cache
+            npx jest --ci --forceExit --cacheDirectory=.jest-cache
           fi
 
   # Every run (push, PR, nightly, manual), in parallel with lint/test. Advisory only.
