@@ -59,3 +59,6 @@ build/
 # Trivy generated reports (surfaced via PR comment + run artifact, never committed)
 security/trivy-report.md
 security/trivy-sca.json
+
+# Jest transform cache (CI + local)
+.jest-cache/
