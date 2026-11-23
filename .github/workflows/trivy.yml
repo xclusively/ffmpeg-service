@@ -1,15 +1,14 @@
 name: Trivy Security Report
 
-# DEV ONLY (never main), NON-BLOCKING. Runs on pushes to dev and PRs into dev, so
+# DEV ONLY (never main), NON-BLOCKING. Runs on PRs into dev (and manually), so
 # prod and the dev -> main promotion are never touched and never gated. Findings
 # are posted as a sticky PR comment + a run artifact; nothing is committed
 # (generated output stays out of git). Accepted findings go in .trivyignore.
 # Runs on GitHub's runners — zero RAM on our servers.
 on:
-  push:
-    branches: [dev]
   pull_request:
     branches: [dev]
+  workflow_dispatch:
 
 permissions:
   contents: read
