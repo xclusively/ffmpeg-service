@@ -107,6 +107,10 @@ pipeline {
                     fi
                     echo "Test mode selected: $MODE"
 
+                    # Test on the same Node major as production (the service's Dockerfile FROM node:<major>).
+                    NODE_IMAGE=$(grep -m1 -oE '^FROM node:[0-9]+' Dockerfile | cut -d' ' -f2 || true)
+                    NODE_IMAGE="${NODE_IMAGE:-node:24}"
+                    echo "Test image: $NODE_IMAGE (from Dockerfile)"
                     mkdir -p "$HOME/.npm-ci-cache"
                     docker run --rm --name "$NODE" \
                         -u "$(id -u):$(id -g)" \
@@ -114,7 +118,7 @@ pipeline {
                         -e JEST_MODE="$MODE" -e JEST_BASE="$BASE" \
                         -v "$WORKSPACE:/app" -w /app \
                         -v "$HOME/.npm-ci-cache:/tmp/.npm" \
-                        node:20 sh -c '
+                        "$NODE_IMAGE" sh -c '
                             set -eu
                             git config --global --add safe.directory /app
                             npm ci --prefer-offline --no-audit --no-fund
@@ -135,9 +139,18 @@ pipeline {
             post {
                 always {
                     script {
-                        // e.g. "Tests: 2 failed, 118 passed, 120 total" -> used in the GitHub status text.
-                        env.TEST_SUMMARY = sh(returnStdout: true,
-                            script: "grep -m1 -E '^Tests:' .ci-jest.log 2>/dev/null | tr -s ' ' || true").trim()
+                        // e.g. "Tests: 1 failed, 238 passed | suites: 1 failed | foo.test.js" (first failing file).
+                        env.TEST_SUMMARY = sh(returnStdout: true, script: '''
+                            L=.ci-jest.log
+                            [ -f "$L" ] || exit 0
+                            T=$(grep -m1 -E '^Tests:' "$L" | sed -E 's/, [0-9]+ total//' | tr -s ' ' || true)
+                            S=$(grep -m1 -E '^Test Suites:.*failed' "$L" | grep -oE '[0-9]+ failed' | head -1 || true)
+                            F=$(grep -m1 -E '^FAIL ' "$L" | awk '{print $2}' | sed 's#.*/##' || true)
+                            OUT="$T"
+                            [ -n "$S" ] && OUT="$OUT | suites: $S"
+                            [ -n "$F" ] && OUT="$OUT | $F"
+                            printf '%s' "$OUT"
+                        ''').trim()
                         sh 'rm -f .ci-jest.log'
                     }
                     sh '''
