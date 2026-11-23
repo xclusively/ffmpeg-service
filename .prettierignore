@@ -17,3 +17,6 @@ pnpm-lock.yaml
 # Trivy generated reports
 security/trivy-report.md
 security/trivy-sca.json
+
+# Jest cache
+.jest-cache/

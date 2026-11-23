@@ -1,16 +1,50 @@
 name: CI/CD Pipeline
 
+# Only PRs into dev (plus manual runs). Unit tests are NOT here: they run in Jenkins on every
+# dev build (GitHub Actions minutes limit).
 on:
-  push:
-    branches: ['main', 'dev']
   pull_request:
-    branches: ['main', 'dev']
+    branches: ['dev']
+    paths-ignore: ['**/*.md']
+  workflow_dispatch:
+
+# Least privilege: jobs only need to read the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref (new push to a PR, etc.).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build, Lint, and Test
+  lint:
+    name: Lint and Format
     runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Linter Check
+        run: npm run lint:dry-run
+
+      - name: Run Formatter Check
+        run: npm run format:dry-run
+
+  # PRs into dev + manual runs, in parallel with lint. Advisory only.
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -27,12 +61,3 @@ jobs:
       - name: Security Audit
         run: npm audit --audit-level=high
         continue-on-error: true
-
-      - name: Run Linter Check
-        run: npm run lint:dry-run
-
-      - name: Run Formatter Check
-        run: npm run format:dry-run
-
-      - name: Run Tests
-        run: npm run test
